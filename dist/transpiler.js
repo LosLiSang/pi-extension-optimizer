@@ -249,11 +249,51 @@ function getPackageStatus(pkg) {
   else state = "javascript";
   return { name: pkg.name, entry: pkg.entry, state, distExists, hasBackup };
 }
+function latestSourceMtime(dir) {
+  let latest = 0;
+  const walk = (d) => {
+    let names;
+    try {
+      names = readdirSync(d);
+    } catch {
+      return;
+    }
+    for (const n of names) {
+      const full = join(d, n);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        if (!SKIP_DIRS.has(n)) walk(full);
+      } else if (n.endsWith(".ts") && !n.endsWith(".d.ts")) {
+        latest = Math.max(latest, st.mtimeMs);
+      }
+    }
+  };
+  walk(dir);
+  return latest;
+}
+function extensionNeedsBuild(ext) {
+  if (!ext.optimized) return true;
+  const targetFile = join(ext.pkgDir, optimizedEntryFor(ext.entry).replace(/^\.\//, ""));
+  if (!existsSync(targetFile)) return true;
+  const srcRoot = join(ext.pkgDir, ext.srcDir);
+  if (!existsSync(srcRoot)) return false;
+  try {
+    return latestSourceMtime(srcRoot) > statSync(targetFile).mtimeMs + 1e3;
+  } catch {
+    return false;
+  }
+}
 export {
   OPTIMIZED_ENTRY,
   applyOne,
   buildOne,
   ensureHarnessJunctions,
+  extensionNeedsBuild,
   getPackageStatus,
   optimizedEntryFor,
   rollbackOne,

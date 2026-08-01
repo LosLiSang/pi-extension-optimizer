@@ -323,3 +323,51 @@ export function getPackageStatus(pkg: PiPackage): PackageStatus {
 	else state = "javascript";
 	return { name: pkg.name, entry: pkg.entry, state, distExists, hasBackup };
 }
+
+/** 源码树中最新的 .ts 修改时间（用于判断产物是否过期）。 */
+function latestSourceMtime(dir: string): number {
+	let latest = 0;
+	const walk = (d: string) => {
+		let names: string[];
+		try {
+			names = readdirSync(d);
+		} catch {
+			return;
+		}
+		for (const n of names) {
+			const full = join(d, n);
+			let st;
+			try {
+				st = statSync(full);
+			} catch {
+				continue;
+			}
+			if (st.isDirectory()) {
+				if (!SKIP_DIRS.has(n)) walk(full);
+			} else if (n.endsWith(".ts") && !n.endsWith(".d.ts")) {
+				latest = Math.max(latest, st.mtimeMs);
+			}
+		}
+	};
+	walk(dir);
+	return latest;
+}
+
+/**
+ * 判断扩展是否需要（重新）build：
+ * - 入口仍是 .ts → 需要（未优化）
+ * - 入口是 dist-opt 但产物缺失 → 需要（broken）
+ * - 源码树比产物入口新 → 需要（过期，扩展升级后旧产物还在）
+ */
+export function extensionNeedsBuild(ext: OptimizableExtension): boolean {
+	if (!ext.optimized) return true;
+	const targetFile = join(ext.pkgDir, optimizedEntryFor(ext.entry).replace(/^\.\//, ""));
+	if (!existsSync(targetFile)) return true;
+	const srcRoot = join(ext.pkgDir, ext.srcDir);
+	if (!existsSync(srcRoot)) return false;
+	try {
+		return latestSourceMtime(srcRoot) > statSync(targetFile).mtimeMs + 1000;
+	} catch {
+		return false;
+	}
+}

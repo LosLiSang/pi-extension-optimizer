@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { agentDir, agentNodeModules } from "./paths.js";
 import { runMeasure } from "./measure.js";
 import { enabledNpmPackageNames, scanOptimizableExtensions, scanPiExtensions } from "./scanner.js";
-import { buildOne, getPackageStatus, rollbackOne } from "./transpiler.js";
+import { buildOne, extensionNeedsBuild, getPackageStatus, rollbackOne } from "./transpiler.js";
 
 const PACKAGE_NAME = "pi-extension-optimizer";
 const STATUS_KEY = "pi-extension-optimizer";
@@ -43,15 +43,22 @@ async function confirmMutation(ctx: any, title: string, message: string, args: s
 async function handleBuild(args: string, ctx: any) {
 	const nm = agentNodeModules();
 	const enabled = enabledNpmPackageNames(agentDir());
-	const targets = scanOptimizableExtensions(nm, [PACKAGE_NAME]).filter((ext) => enabled.has(ext.name));
+	const allTargets = scanOptimizableExtensions(nm, [PACKAGE_NAME]).filter((ext) => enabled.has(ext.name));
+	const ifNeeded = args.split(/\s+/).includes("--if-needed");
+	const targets = ifNeeded ? allTargets.filter((ext) => extensionNeedsBuild(ext)) : allTargets;
 	if (targets.length === 0) {
-		ctx.ui.notify("启用的扩展中没有发现可优化的 TypeScript 包。", "info");
+		if (ifNeeded) {
+			ctx.ui.notify("所有启用的包都已优化且未过期，无需重建。", "success");
+		} else {
+			ctx.ui.notify("启用的扩展中没有发现可优化的 TypeScript 包。", "info");
+		}
 		return;
 	}
+	const skipCount = allTargets.length - targets.length;
 	const confirmed = await confirmMutation(
 		ctx,
 		"构建扩展优化",
-		`将预编译 ${targets.length} 个扩展并修改各自 package.json。首次修改会创建 package.json.pi-orig 备份。继续？`,
+		`将预编译 ${targets.length} 个扩展并修改各自 package.json。首次修改会创建 package.json.pi-orig 备份。${ifNeeded && skipCount > 0 ? `（已跳过 ${skipCount} 个未过期的已优化包）` : ""}继续？`,
 		args,
 	);
 	if (!confirmed) {
@@ -88,20 +95,36 @@ async function handleBuild(args: string, ctx: any) {
 
 async function handleStatus(ctx: any) {
 	const enabled = enabledNpmPackageNames(agentDir());
-	const packages = scanPiExtensions(agentNodeModules(), [PACKAGE_NAME]).filter((pkg) => enabled.has(pkg.name));
-	const statuses = packages.map(getPackageStatus);
+	const allPkgs = scanPiExtensions(agentNodeModules(), [PACKAGE_NAME]).filter((pkg) => enabled.has(pkg.name));
+	const extByName = new Map(
+		scanOptimizableExtensions(agentNodeModules(), [PACKAGE_NAME])
+			.filter((ext) => enabled.has(ext.name))
+			.map((ext) => [ext.name, ext]),
+	);
+	const statuses = allPkgs.map((pkg) => {
+		const st = getPackageStatus(pkg);
+		const ext = extByName.get(pkg.name);
+		let needs = false;
+		let stale = false;
+		if (ext) {
+			stale = st.state === "optimized" && extensionNeedsBuild(ext);
+			needs = st.state === "typescript" || st.state === "broken" || stale;
+		}
+		return { ...st, needs, stale };
+	});
 	const counts = {
 		optimized: statuses.filter((item) => item.state === "optimized").length,
 		typescript: statuses.filter((item) => item.state === "typescript").length,
 		javascript: statuses.filter((item) => item.state === "javascript").length,
 		broken: statuses.filter((item) => item.state === "broken").length,
+		needsBuild: statuses.filter((item) => item.needs).length,
 	};
 	await showLines(
 		ctx,
-		`扩展状态：${counts.optimized} optimized / ${counts.typescript} TypeScript / ${counts.javascript} native JS / ${counts.broken} broken`,
+		`扩展状态：${counts.optimized} optimized / ${counts.typescript} TypeScript / ${counts.javascript} native JS / ${counts.broken} broken — 需要 rebuild：${counts.needsBuild}${counts.needsBuild > 0 ? "（可运行 /ext-opt build --if-needed）" : ""}`,
 		statuses.map((item) => {
 			const icon = item.state === "optimized" ? "✅" : item.state === "typescript" ? "⏳" : item.state === "broken" ? "❌" : "•";
-			const flags = [item.distExists ? "dist" : "", item.hasBackup ? "backup" : ""].filter(Boolean).join(",");
+			const flags = [item.distExists ? "dist" : "", item.hasBackup ? "backup" : "", item.stale ? "⚠️ 过期" : ""].filter(Boolean).join(",");
 			return `${icon} ${item.name}: ${item.entry}${flags ? ` [${flags}]` : ""}`;
 		}),
 	);
@@ -158,6 +181,7 @@ async function handleMeasure(ctx: any) {
 async function handleHelp(ctx: any) {
 	await showLines(ctx, "Pi Extension Optimizer", [
 		"/ext-opt build     — 自动扫描 .ts 入口，transpile 到 dist-opt 并应用",
+		"/ext-opt build --if-needed — 只重建未优化/产物缺失/源码过期的包",
 		"/ext-opt status    — 查看 optimized / TypeScript / native JS / broken 状态",
 		"/ext-opt measure   — 在独立子进程中复刻真实 loader 测 module import",
 		"/ext-opt rollback  — 从 package.json.pi-orig 恢复原入口",

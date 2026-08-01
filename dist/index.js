@@ -1,7 +1,7 @@
 import { agentDir, agentNodeModules } from "./paths.js";
 import { runMeasure } from "./measure.js";
 import { enabledNpmPackageNames, scanOptimizableExtensions, scanPiExtensions } from "./scanner.js";
-import { buildOne, getPackageStatus, rollbackOne } from "./transpiler.js";
+import { buildOne, extensionNeedsBuild, getPackageStatus, rollbackOne } from "./transpiler.js";
 const PACKAGE_NAME = "pi-extension-optimizer";
 const STATUS_KEY = "pi-extension-optimizer";
 const COMMANDS = ["build", "status", "rollback", "measure", "help"];
@@ -36,15 +36,22 @@ async function confirmMutation(ctx, title, message, args) {
 async function handleBuild(args, ctx) {
   const nm = agentNodeModules();
   const enabled = enabledNpmPackageNames(agentDir());
-  const targets = scanOptimizableExtensions(nm, [PACKAGE_NAME]).filter((ext) => enabled.has(ext.name));
+  const allTargets = scanOptimizableExtensions(nm, [PACKAGE_NAME]).filter((ext) => enabled.has(ext.name));
+  const ifNeeded = args.split(/\s+/).includes("--if-needed");
+  const targets = ifNeeded ? allTargets.filter((ext) => extensionNeedsBuild(ext)) : allTargets;
   if (targets.length === 0) {
-    ctx.ui.notify("\u542F\u7528\u7684\u6269\u5C55\u4E2D\u6CA1\u6709\u53D1\u73B0\u53EF\u4F18\u5316\u7684 TypeScript \u5305\u3002", "info");
+    if (ifNeeded) {
+      ctx.ui.notify("\u6240\u6709\u542F\u7528\u7684\u5305\u90FD\u5DF2\u4F18\u5316\u4E14\u672A\u8FC7\u671F\uFF0C\u65E0\u9700\u91CD\u5EFA\u3002", "success");
+    } else {
+      ctx.ui.notify("\u542F\u7528\u7684\u6269\u5C55\u4E2D\u6CA1\u6709\u53D1\u73B0\u53EF\u4F18\u5316\u7684 TypeScript \u5305\u3002", "info");
+    }
     return;
   }
+  const skipCount = allTargets.length - targets.length;
   const confirmed = await confirmMutation(
     ctx,
     "\u6784\u5EFA\u6269\u5C55\u4F18\u5316",
-    `\u5C06\u9884\u7F16\u8BD1 ${targets.length} \u4E2A\u6269\u5C55\u5E76\u4FEE\u6539\u5404\u81EA package.json\u3002\u9996\u6B21\u4FEE\u6539\u4F1A\u521B\u5EFA package.json.pi-orig \u5907\u4EFD\u3002\u7EE7\u7EED\uFF1F`,
+    `\u5C06\u9884\u7F16\u8BD1 ${targets.length} \u4E2A\u6269\u5C55\u5E76\u4FEE\u6539\u5404\u81EA package.json\u3002\u9996\u6B21\u4FEE\u6539\u4F1A\u521B\u5EFA package.json.pi-orig \u5907\u4EFD\u3002${ifNeeded && skipCount > 0 ? `\uFF08\u5DF2\u8DF3\u8FC7 ${skipCount} \u4E2A\u672A\u8FC7\u671F\u7684\u5DF2\u4F18\u5316\u5305\uFF09` : ""}\u7EE7\u7EED\uFF1F`,
     args
   );
   if (!confirmed) {
@@ -77,20 +84,34 @@ async function handleBuild(args, ctx) {
 }
 async function handleStatus(ctx) {
   const enabled = enabledNpmPackageNames(agentDir());
-  const packages = scanPiExtensions(agentNodeModules(), [PACKAGE_NAME]).filter((pkg) => enabled.has(pkg.name));
-  const statuses = packages.map(getPackageStatus);
+  const allPkgs = scanPiExtensions(agentNodeModules(), [PACKAGE_NAME]).filter((pkg) => enabled.has(pkg.name));
+  const extByName = new Map(
+    scanOptimizableExtensions(agentNodeModules(), [PACKAGE_NAME]).filter((ext) => enabled.has(ext.name)).map((ext) => [ext.name, ext])
+  );
+  const statuses = allPkgs.map((pkg) => {
+    const st = getPackageStatus(pkg);
+    const ext = extByName.get(pkg.name);
+    let needs = false;
+    let stale = false;
+    if (ext) {
+      stale = st.state === "optimized" && extensionNeedsBuild(ext);
+      needs = st.state === "typescript" || st.state === "broken" || stale;
+    }
+    return { ...st, needs, stale };
+  });
   const counts = {
     optimized: statuses.filter((item) => item.state === "optimized").length,
     typescript: statuses.filter((item) => item.state === "typescript").length,
     javascript: statuses.filter((item) => item.state === "javascript").length,
-    broken: statuses.filter((item) => item.state === "broken").length
+    broken: statuses.filter((item) => item.state === "broken").length,
+    needsBuild: statuses.filter((item) => item.needs).length
   };
   await showLines(
     ctx,
-    `\u6269\u5C55\u72B6\u6001\uFF1A${counts.optimized} optimized / ${counts.typescript} TypeScript / ${counts.javascript} native JS / ${counts.broken} broken`,
+    `\u6269\u5C55\u72B6\u6001\uFF1A${counts.optimized} optimized / ${counts.typescript} TypeScript / ${counts.javascript} native JS / ${counts.broken} broken \u2014 \u9700\u8981 rebuild\uFF1A${counts.needsBuild}${counts.needsBuild > 0 ? "\uFF08\u53EF\u8FD0\u884C /ext-opt build --if-needed\uFF09" : ""}`,
     statuses.map((item) => {
       const icon = item.state === "optimized" ? "\u2705" : item.state === "typescript" ? "\u23F3" : item.state === "broken" ? "\u274C" : "\u2022";
-      const flags = [item.distExists ? "dist" : "", item.hasBackup ? "backup" : ""].filter(Boolean).join(",");
+      const flags = [item.distExists ? "dist" : "", item.hasBackup ? "backup" : "", item.stale ? "\u26A0\uFE0F \u8FC7\u671F" : ""].filter(Boolean).join(",");
       return `${icon} ${item.name}: ${item.entry}${flags ? ` [${flags}]` : ""}`;
     })
   );
@@ -142,6 +163,7 @@ async function handleMeasure(ctx) {
 async function handleHelp(ctx) {
   await showLines(ctx, "Pi Extension Optimizer", [
     "/ext-opt build     \u2014 \u81EA\u52A8\u626B\u63CF .ts \u5165\u53E3\uFF0Ctranspile \u5230 dist-opt \u5E76\u5E94\u7528",
+    "/ext-opt build --if-needed \u2014 \u53EA\u91CD\u5EFA\u672A\u4F18\u5316/\u4EA7\u7269\u7F3A\u5931/\u6E90\u7801\u8FC7\u671F\u7684\u5305",
     "/ext-opt status    \u2014 \u67E5\u770B optimized / TypeScript / native JS / broken \u72B6\u6001",
     "/ext-opt measure   \u2014 \u5728\u72EC\u7ACB\u5B50\u8FDB\u7A0B\u4E2D\u590D\u523B\u771F\u5B9E loader \u6D4B module import",
     "/ext-opt rollback  \u2014 \u4ECE package.json.pi-orig \u6062\u590D\u539F\u5165\u53E3",
