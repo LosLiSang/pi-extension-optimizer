@@ -1,92 +1,126 @@
-# pi-extension-optimizer
+<div align="center">
 
-A Pi package that precompiles installed TypeScript extensions to reduce startup time. It provides a single `/ext-opt` command with build, status, rollback, and measurement workflows.
+# ⚡ pi-extension-optimizer
 
-## Why
+**Precompile your TypeScript Pi extensions for dramatically faster startup.**
 
-Pi loads TypeScript extensions through jiti. Extensions distributed as `.ts` pay runtime transpilation cost on every cold start. This package automatically discovers those extensions, transpiles their source tree to `dist-opt/*.js`, backs up `package.json`, and changes `pi.extensions` to `./dist-opt/index.js`.
+[![Pi extension](https://img.shields.io/badge/Pi-extension-4B8BBE.svg?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTEyIDJMMiA3djZsMTAgNWwxMC01VjdsLTEwLTV6TTIgMTdsMTAgNWwxMC01di0zbC0xMCA1bC0xMC01djN6Ii8+PC9zdmc+)](https://pi.dev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/pi-extension-optimizer)](https://www.npmjs.com/package/pi-extension-optimizer)
 
-It does **not** modify anything automatically during startup. Every mutation is initiated explicitly through `/ext-opt build` or `/ext-opt rollback` and requires confirmation unless `--yes` is supplied.
+<br/>
 
-## Install from a local checkout
+| ⏱️ Extensions load | 🚀 Own startup cost |
+|---|---|
+| **~13.2s → ~3.0s** (baseline → optimized) | **2558ms → 156ms** |
+
+</div>
+
+---
+
+## ✨ What it does
+
+Pi loads every `.ts` extension through [jiti](https://github.com/unjs/jiti) at each cold start — a full TypeScript compile pass **per file, per startup**, with no disk cache (`moduleCache: false`). If you run several extensions (web access, MCP, status bars…), that adds up to **seconds** of dead time.
+
+`pi-extension-optimizer` precompiles the `.ts` sources of your installed extensions into plain `.js`, and rewires their `pi.extensions` entry to the compiled output. jiti skips `.js` — **zero transpilation at startup**.
+
+- 🔍 **Auto-scans** every enabled package in `settings.json` — no hard-coded lists
+- 🛟 **Backs up** each `package.json` (`.pi-orig`) before touching it — one command to roll back
+- 🔗 **Creates harness junctions** so runtime dynamic `import()` resolves correctly (no more `Cannot find package '@earendil-works/pi-coding-agent'`)
+- 🔁 **Transpiles `.ts`-distributed dependency packages** (e.g. `@juicesharp/rpiv-config`) that Node refuses to type-strip under `node_modules`
+- 🧪 **`measure`** reports the *real* startup cost (preloads the Pi harness, like the actual main process) — not a cold-subprocess artifact
+- ⚡ **Lazy `esbuild`** + zero harness-main-package imports keep the optimizer's own startup cost at **~156ms**
+
+## 🚀 Installation
 
 ```bash
-cd /path/to/pi-extension-optimizer
-npm install
-npm run build
+# from git (SSH key already set up on GitHub)
+pi install git:github.com/LosLiSang/pi-extension-optimizer
+
+# or from a local checkout
+git clone https://github.com/LosLiSang/pi-extension-optimizer.git
+cd pi-extension-optimizer && npm install && npm run build
 pi install /absolute/path/to/pi-extension-optimizer
 ```
 
-Local path packages are referenced in place. Keep the checkout and its `node_modules` directory available.
-
-For cross-machine sync, publish/use a Git or npm source instead of an absolute local path:
-
-```bash
-pi install git:github.com/USER/pi-extension-optimizer@v0.1.0
-# or, after publishing:
-pi install npm:pi-extension-optimizer
-```
-
-A Git/npm package entry in `settings.json` can be synchronized by pi-sync. Generated `dist-opt` files are intentionally machine-local and are rebuilt with `/ext-opt build` on each machine.
-
-## Commands
+Then restart Pi (or `/reload`) and run:
 
 ```text
-/ext-opt              Interactive menu
-/ext-opt build        Discover, transpile, back up, and apply optimizations
-/ext-opt status       Show optimized / TypeScript / native JS / broken entries
-/ext-opt measure      Measure enabled package module-import time in a child process
-/ext-opt rollback     Restore package.json from package.json.pi-orig
-/ext-opt help         Show command help
+/ext-opt build
 ```
 
-For non-interactive mutation commands:
+## 🕹️ Usage
+
+| Command | Action |
+|---|---|
+| `/ext-opt` | Interactive menu |
+| `/ext-opt build` | Discover `.ts` extensions → transpile → back up → apply |
+| `/ext-opt status` | Show `optimized / TypeScript / native JS / broken` per package |
+| `/ext-opt measure` | Time the real module-import phase in a clean child process |
+| `/ext-opt rollback` | Restore every `package.json` from its `.pi-orig` backup |
+
+Non-interactive mutation commands accept `--yes`:
 
 ```text
 /ext-opt build --yes
 /ext-opt rollback --yes
 ```
 
-## Build behavior
+## 📊 Performance
 
-- Scans Pi's user package directory from the official `getAgentDir()` API.
-- Only packages **enabled in `settings.json`** are touched; disabled/unused packages are never modified.
-- Finds packages whose current entry is `.ts`.
-- Also recognizes previously optimized packages through `package.json.pi-orig`.
-- Uses esbuild transform mode: no bundling, module structure preserved.
-- Rewrites explicit relative `.ts` imports to `.js`.
-- **Creates `node_modules` junctions** for `@earendil-works/pi-coding-agent`, `pi-ai`, and `pi-agent-core`, pointing at the real Pi harness (resolved from `process.execPath`, falling back to `getPackageDir()`). Extensions keep bare harness imports: the static chain is handled by jiti's aliases (same performance as raw `.ts`), and runtime dynamic `import()`/`require()` resolves natively through the junctions. This avoids both the original `Cannot find package` failures and the slowdown of rewriting imports to absolute `file://` URLs (which made jiti reload the harness repeatedly).
-- **Transpiles `.ts`-distributed dependency packages** (e.g. `@juicesharp/rpiv-config`) into their own `dist-opt/` and rewrites the extension's imports to point at them. Node refuses to type-strip `.ts` files under `node_modules`. Dependency `package.json` files are never modified.
-- Writes output to `<package>/dist-opt/`.
-- Creates `<package>/package.json.pi-orig` before the first entry rewrite.
-- Applies an entry only when every TypeScript source file transpiles successfully and the target entry exists.
+Measured on the author's setup (15 enabled extensions, Pi 0.83.0, real startup timing via `PI_TIMING=1`):
 
-> Junctions are machine-specific (they point at the real harness). Rebuild with `/ext-opt build` after upgrading Pi, reinstalling packages, or moving to another machine — the build re-creates missing junctions automatically.
+| Phase | Before | After |
+|---|---|---|
+| Extensions `module import` | **~13.2s** (all `.ts`, jiti transpile) | **~3.0s** (precompiled `.js`) |
+| This package's own load | **2558ms** (eager esbuild + harness import) | **156ms** (lazy + zero harness imports) |
 
-## Upgrade behavior
+The remaining ~3s is dominated by *native `.js` dependencies* each extension brings (e.g. MCP SDK, `pi-tui-kit`) — V8 compilation that no transpile step can remove. Precompilation eliminates the **`.ts` transpile cost**, which is the part that scales with every file of every extension.
 
-`pi update --extensions` or npm reinstall may replace modified package directories. Run:
+## 🛠️ How it works
 
 ```text
-/ext-opt build
+installed extension (node_modules/pkg)
+  │  package.json  pi.extensions: ["./src/index.ts"]
+  │
+  ▼  /ext-opt build
+  ├─ esbuild transform: src/*.ts ──────────► dist-opt/*.js   (no bundling, structure preserved)
+  ├─ package.json.pi-orig  ← original package.json backup
+  └─ pi.extensions: ["./dist-opt/index.js"]
+
+Pi startup:
+  ├─ jiti loads dist-opt/index.js  → .js → NO transpile  ⚡
+  ├─ dynamic import("...")         → Node native resolve
+  │    └─ @earendil-works/*  → junction in pi node_modules → real harness ✓
+  └─ factory registers tools/commands  (unchanged)
 ```
 
-again after package updates. Automatic scanning removes the need for a hard-coded package list.
+**Why junctions?** Runtime dynamic `import()` is handled by Node natively — jiti's aliases don't apply there, and the harness packages live *outside* Pi's `node_modules`. A `node_modules` junction points `@earendil-works/pi-coding-agent` (and friends) at the real harness, so both the static chain (jiti aliases, same speed as raw `.ts`) and the dynamic chain (native) resolve correctly.
 
-## Rollback
+## 🔄 Upgrading
 
-`/ext-opt rollback` restores every currently optimized package that has a `package.json.pi-orig` backup. `dist-opt` files remain on disk but are no longer referenced.
+Pi package updates or npm reinstalls replace extension directories, reverting entries to `.ts`. Just run **`/ext-opt build`** again — automatic scanning re-optimizes everything (the build also re-creates any missing junctions).
 
-## Measurement
+## ↩️ Rollback
 
-`/ext-opt measure` starts a clean Node child process, reads enabled npm packages from `~/.pi/agent/settings.json`, and reproduces Pi's loader behavior (`createJiti`, independent instance per entry, `moduleCache:false`, serial loading).
+`/ext-opt rollback` restores every currently optimized package from its `.pi-orig` backup. `dist-opt/` files remain on disk but are no longer referenced.
 
-Before timing extensions, the runner **preloads the Pi harness** (the same way the real Pi main process already has it loaded). This is important: a cold subprocess pays a one-time ~1.5-2.6s cost to compile `pi-coding-agent` and its shared deps, which the real Pi already paid at startup. After preloading, shared packages hit the Node module registry and are free for every extension. The reported total is therefore the **real startup extension-loading cost**, not a cold-process artifact.
+## 🔒 Safety
 
-After each entry loads, the runner also executes every relative dynamic `import()` found in the optimized output using native Node loading — this catches runtime failures that static-chain-only checks miss (e.g. extensions whose commands dynamically load modal components).
+- **No automatic modification** — nothing runs at startup; every mutation is an explicit command with a confirmation prompt (`--yes` to skip)
+- **Only packages enabled in `settings.json`** are touched; disabled/unused packages are never modified
+- **Per-package backups** before the first entry rewrite, refreshed on upgrade
+- **Entry applied only when** every source file transpiles successfully *and* the target entry exists
+- Never uploads data or contacts external services
 
-Filesystem cache state can affect timing results, so compare warmed multi-run values.
+## 🧰 Development
 
-## Security
+```bash
+npm install
+npm run build        # compile src/ → dist/
+npm run test:core    # fixture tests (transpile, backup/apply/rollback, dependency-chain, junction behavior)
+```
 
-Pi packages run with full system permissions. This package intentionally modifies installed extension `package.json` files and creates generated JavaScript files. Review the source before installation and keep backups. It never uploads files or contacts external services.
+## 📄 License
+
+[MIT](LICENSE) © LosLiSang
