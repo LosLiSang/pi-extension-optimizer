@@ -219,9 +219,7 @@ async function transpileDotTsDeps(
 		if (!entryRel || !entryRel.endsWith(".ts")) continue; // 非 .ts 分发无需处理
 
 		const t = await transpileTree(pkgDir, join(pkgDir, "dist-opt"), errors);
-		if (t.errors?.length) {
-			errors.push(`依赖包 ${pkgName}: ${t.errors.join("; ")}`);
-		}
+		// transpileTree 已把错误按相对路径写入 errors（共享数组），无需二次包装。
 		// 递归该依赖包产物中的 .ts 依赖
 		await transpileDotTsDeps({ name: pkgName, pkgDir, srcDir: "." } as OptimizableExtension, nm, visited, errors);
 

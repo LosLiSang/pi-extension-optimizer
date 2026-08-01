@@ -27,12 +27,14 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "prepare": "npm run build",
+    "typecheck": "tsc --noEmit",
     "test:core": "npm run build && node scripts/test-core.mjs"
   },
   "dependencies": {
     "esbuild": "^0.28.1"
   },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
   }
 }

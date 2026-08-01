@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** 解析 npm spec（npm:@scope/pkg@1.2.3 -> @scope/pkg；npm:pkg@1 -> pkg） */

@@ -177,9 +177,6 @@ async function transpileDotTsDeps(ext, nm, visited, errors) {
     const entryRel = resolvePackageEntry(pj);
     if (!entryRel || !entryRel.endsWith(".ts")) continue;
     const t = await transpileTree(pkgDir, join(pkgDir, "dist-opt"), errors);
-    if (t.errors?.length) {
-      errors.push(`\u4F9D\u8D56\u5305 ${pkgName}: ${t.errors.join("; ")}`);
-    }
     await transpileDotTsDeps({ name: pkgName, pkgDir, srcDir: "." }, nm, visited, errors);
     const targetEntry = join(pkgDir, "dist-opt", entryRel.replace(/^\.\//, "").replace(/\.ts$/, ".js"));
     if (existsSync(targetEntry)) {
