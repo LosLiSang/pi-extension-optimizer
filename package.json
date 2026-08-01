@@ -1,0 +1,38 @@
+{
+  "name": "pi-extension-optimizer",
+  "version": "0.1.0",
+  "description": "Pi package that precompiles TypeScript extensions to speed up startup, with status, rollback, and measurement commands.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "performance",
+    "startup",
+    "optimizer"
+  ],
+  "files": [
+    "dist",
+    "src",
+    "scripts",
+    "measure-runner.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "npm run build",
+    "test:core": "npm run build && node scripts/test-core.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
