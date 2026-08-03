@@ -1,10 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-/** 解析 npm spec（npm:@scope/pkg@1.2.3 -> @scope/pkg；npm:pkg@1 -> pkg） */
+/** 解析 npm spec（@scope/pkg@1.2.3 -> @scope/pkg；pkg@1 -> pkg） */
 export function parseNpmName(spec: string): string {
 	if (spec.startsWith("@")) {
 		const slash = spec.indexOf("/");
+		if (slash < 0) return spec; // 不完整 spec（无 scope 名），原样返回
 		const at = spec.indexOf("@", slash + 1);
 		return at >= 0 ? spec.slice(0, at) : spec;
 	}
@@ -116,7 +117,8 @@ export function scanOptimizableExtensions(nmDir: string, exclude: string[] = [])
 			...pkg,
 			sourceEntry,
 			srcDir: inferSrcDir(sourceEntry),
-			optimized: pkg.entry === "./dist-opt/index.js",
+			// 任何 dist-opt 入口都算已优化（不硬编码 index.js，非 index 入口同样适用）
+			optimized: pkg.entry.startsWith("./dist-opt/"),
 		}];
 	});
 }

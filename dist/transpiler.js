@@ -1,20 +1,20 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { realHarnessDir } from "./paths.js";
-const OPTIMIZED_ENTRY = "./dist-opt/index.js";
 const SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
-function ensureHarnessJunctions(nm) {
-  const harness = realHarnessDir();
+function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
   const nestedRoot = join(harness, "node_modules", "@earendil-works");
   const created = [];
   const targets = [
@@ -24,7 +24,21 @@ function ensureHarnessJunctions(nm) {
   ];
   for (const [name, target] of targets) {
     const link = join(nm, name);
-    if (existsSync(link)) continue;
+    let hasLink = false;
+    try {
+      lstatSync(link);
+      hasLink = true;
+    } catch {
+    }
+    if (hasLink) {
+      if (existsSync(link)) continue;
+      try {
+        unlinkSync(link);
+      } catch {
+        continue;
+      }
+    }
+    if (!existsSync(target)) continue;
     try {
       mkdirSync(dirname(link), { recursive: true });
       symlinkSync(target, link, "junction");
@@ -88,13 +102,6 @@ async function transpileTree(srcRoot, outRoot, errors) {
   }
   return { files: written, total: files.length };
 }
-async function transpileOne(ext) {
-  const errors = [];
-  const srcRoot = join(ext.pkgDir, ext.srcDir);
-  if (!existsSync(srcRoot)) return { files: 0, total: 0, errors: [`\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`] };
-  const result = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
-  return { ...result, errors };
-}
 function nodeModulesRootOf(pkgDir) {
   const parent = dirname(pkgDir);
   return basename(parent) === "node_modules" ? parent : dirname(parent);
@@ -127,7 +134,13 @@ function collectBarePackageNames(dir) {
     }
     for (const n of names) {
       const full = join(d, n);
-      if (statSync(full).isDirectory()) {
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
         if (!SKIP_DIRS.has(n)) walk(full);
       } else if (n.endsWith(".js")) {
         const code = readFileSync(full, "utf8");
@@ -146,9 +159,21 @@ function collectBarePackageNames(dir) {
 function rewriteBareImportInTree(root, pkgName, fileUrl) {
   const re = new RegExp(`(from\\s+|import\\s*\\(\\s*|import\\s+|export[^;]*from\\s+)\\s*["']${escapeRegExp(pkgName)}["']`, "g");
   const walk = (d) => {
-    for (const n of readdirSync(d)) {
+    let names;
+    try {
+      names = readdirSync(d);
+    } catch {
+      return;
+    }
+    for (const n of names) {
       const full = join(d, n);
-      if (statSync(full).isDirectory()) {
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
         if (!SKIP_DIRS.has(n)) walk(full);
       } else if (n.endsWith(".js")) {
         const code = readFileSync(full, "utf8");
@@ -195,7 +220,9 @@ function applyOne(ext) {
   const previous = pkg.pi.extensions[0];
   if (previous === target) return "\u5DF2\u5E94\u7528";
   writeFileSync(backupPath, raw);
-  pkg.pi.extensions = [target];
+  const extensions = [...pkg.pi.extensions];
+  extensions[0] = target;
+  pkg.pi.extensions = extensions;
   writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}
 `);
   return `${previous} \u2192 ${target}`;
@@ -238,7 +265,7 @@ function rollbackOne(pkg) {
   return "\u5DF2\u4ECE package.json.pi-orig \u6062\u590D";
 }
 function getPackageStatus(pkg) {
-  const distExists = existsSync(join(pkg.pkgDir, "dist-opt", "index.js"));
+  const distExists = pkg.entry.startsWith("./dist-opt/") ? existsSync(join(pkg.pkgDir, pkg.entry.replace(/^\.\//, ""))) : existsSync(join(pkg.pkgDir, "dist-opt", "index.js"));
   const hasBackup = existsSync(join(pkg.pkgDir, "package.json.pi-orig"));
   let state;
   if (pkg.entry.startsWith("./dist-opt/")) state = distExists ? "optimized" : "broken";
@@ -246,7 +273,7 @@ function getPackageStatus(pkg) {
   else state = "javascript";
   return { name: pkg.name, entry: pkg.entry, state, distExists, hasBackup };
 }
-function latestSourceMtime(dir) {
+function latestMtime(dir, match) {
   let latest = 0;
   const walk = (d) => {
     let names;
@@ -265,7 +292,7 @@ function latestSourceMtime(dir) {
       }
       if (st.isDirectory()) {
         if (!SKIP_DIRS.has(n)) walk(full);
-      } else if (n.endsWith(".ts") && !n.endsWith(".d.ts")) {
+      } else if (match(n)) {
         latest = Math.max(latest, st.mtimeMs);
       }
     }
@@ -280,19 +307,19 @@ function extensionNeedsBuild(ext) {
   const srcRoot = join(ext.pkgDir, ext.srcDir);
   if (!existsSync(srcRoot)) return false;
   try {
-    return latestSourceMtime(srcRoot) > statSync(targetFile).mtimeMs + 1e3;
+    const srcMtime = latestMtime(srcRoot, (name) => name.endsWith(".ts") && !name.endsWith(".d.ts"));
+    const outMtime = latestMtime(join(ext.pkgDir, "dist-opt"), (name) => name.endsWith(".js"));
+    return srcMtime > outMtime + 1e3;
   } catch {
     return false;
   }
 }
 export {
-  OPTIMIZED_ENTRY,
   applyOne,
   buildOne,
   ensureHarnessJunctions,
   extensionNeedsBuild,
   getPackageStatus,
   optimizedEntryFor,
-  rollbackOne,
-  transpileOne
+  rollbackOne
 };

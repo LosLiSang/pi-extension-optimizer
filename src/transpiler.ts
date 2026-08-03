@@ -1,10 +1,12 @@
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
 	statSync,
 	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -12,7 +14,6 @@ import { pathToFileURL } from "node:url";
 import { realHarnessDir } from "./paths.js";
 import type { OptimizableExtension, PiPackage } from "./scanner.js";
 
-export const OPTIMIZED_ENTRY = "./dist-opt/index.js";
 const SKIP_DIRS = new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
 
@@ -20,9 +21,12 @@ const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\
  * 在 pi 的 node_modules 根创建 harness 包 junction（@earendil-works/pi-coding-agent 等 → 真实 harness）。
  * 这样产物保留 bare import：静态链由 jiti alias 处理（性能 = 原 .ts 加载），
  * 运行时动态 import()/require() 由 Node 原生解析到 junction（真实 harness）。
+ *
+ * 修复语义：已存在且可解析的链接保留；损坏的链接（existsSync 跟随目标失败）先删后建；
+ * 目标不存在的（如扁平安装下无嵌套 pi-ai）不创建悬空 junction。
+ * harness 参数仅测试注入用，默认取 realHarnessDir()。
  */
-export function ensureHarnessJunctions(nm: string): string[] {
-	const harness = realHarnessDir();
+export function ensureHarnessJunctions(nm: string, harness: string = realHarnessDir()): string[] {
 	const nestedRoot = join(harness, "node_modules", "@earendil-works");
 	const created: string[] = [];
 	// pi-ai / pi-agent-core 是 pi-coding-agent 包内 node_modules 下的嵌套包
@@ -33,7 +37,24 @@ export function ensureHarnessJunctions(nm: string): string[] {
 	];
 	for (const [name, target] of targets) {
 		const link = join(nm, name);
-		if (existsSync(link)) continue; // 已有（npm 安装或旧 junction）
+		let hasLink = false;
+		try {
+			lstatSync(link);
+			hasLink = true;
+		} catch {
+			// 链接不存在
+		}
+		if (hasLink) {
+			if (existsSync(link)) continue; // 健康（真实目录或可解析 junction）
+			try {
+				// Windows 上 broken junction 必须用 unlinkSync 删链接本身；
+				// rmSync 会静默保留链接（且递归删除有跟随 junction 误删目标的风险）。
+				unlinkSync(link);
+			} catch {
+				continue; // 无法移除则放弃，静态链仍由 jiti alias 处理
+			}
+		}
+		if (!existsSync(target)) continue; // 目标不存在：不创建悬空 junction
 		try {
 			mkdirSync(dirname(link), { recursive: true });
 			symlinkSync(target, link, "junction");
@@ -110,14 +131,6 @@ async function transpileTree(
 	return { files: written, total: files.length };
 }
 
-export async function transpileOne(ext: OptimizableExtension): Promise<{ files: number; total: number; errors: string[] }> {
-	const errors: string[] = [];
-	const srcRoot = join(ext.pkgDir, ext.srcDir);
-	if (!existsSync(srcRoot)) return { files: 0, total: 0, errors: [`源码目录不存在: ${srcRoot}`] };
-	const result = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
-	return { ...result, errors };
-}
-
 function nodeModulesRootOf(pkgDir: string): string {
 	const parent = dirname(pkgDir);
 	return basename(parent) === "node_modules" ? parent : dirname(parent);
@@ -143,7 +156,7 @@ function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** 收集目录树中所有 import 语句的裸包名（去 scope/子路径）。 */
+/** 收集目录树中所有 import 语句的裸包名（去 scope/子路径）。不识别 require()：产物为 esm，出现 CJS 依赖属例外场景。 */
 function collectBarePackageNames(dir: string): Set<string> {
 	const out = new Set<string>();
 	const walk = (d: string) => {
@@ -155,7 +168,13 @@ function collectBarePackageNames(dir: string): Set<string> {
 		}
 		for (const n of names) {
 			const full = join(d, n);
-			if (statSync(full).isDirectory()) {
+			let st;
+			try {
+				st = statSync(full);
+			} catch {
+				continue; // broken symlink 等：跳过而不是中断整个 build
+			}
+			if (st.isDirectory()) {
 				if (!SKIP_DIRS.has(n)) walk(full);
 			} else if (n.endsWith(".js")) {
 				const code = readFileSync(full, "utf8");
@@ -176,9 +195,21 @@ function collectBarePackageNames(dir: string): Set<string> {
 function rewriteBareImportInTree(root: string, pkgName: string, fileUrl: string) {
 	const re = new RegExp(`(from\\s+|import\\s*\\(\\s*|import\\s+|export[^;]*from\\s+)\\s*["']${escapeRegExp(pkgName)}["']`, "g");
 	const walk = (d: string) => {
-		for (const n of readdirSync(d)) {
+		let names: string[];
+		try {
+			names = readdirSync(d);
+		} catch {
+			return;
+		}
+		for (const n of names) {
 			const full = join(d, n);
-			if (statSync(full).isDirectory()) {
+			let st;
+			try {
+				st = statSync(full);
+			} catch {
+				continue;
+			}
+			if (st.isDirectory()) {
 				if (!SKIP_DIRS.has(n)) walk(full);
 			} else if (n.endsWith(".js")) {
 				const code = readFileSync(full, "utf8");
@@ -265,7 +296,10 @@ export function applyOne(ext: OptimizableExtension): string {
 	if (previous === target) return "已应用";
 	// 此时 package.json 是当前版本的原始入口，覆盖旧备份是安全且必要的。
 	writeFileSync(backupPath, raw);
-	pkg.pi.extensions = [target];
+	// 只替换第 0 项，保留多入口包的其余入口。
+	const extensions = [...pkg.pi.extensions];
+	extensions[0] = target;
+	pkg.pi.extensions = extensions;
 	writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
 	return `${previous} → ${target}`;
 }
@@ -313,7 +347,10 @@ export function rollbackOne(pkg: PiPackage): string {
 }
 
 export function getPackageStatus(pkg: PiPackage): PackageStatus {
-	const distExists = existsSync(join(pkg.pkgDir, "dist-opt", "index.js"));
+	// 优化入口按实际入口文件判定（非 index 入口同样适用）；其余情况保持旧语义（index.js）
+	const distExists = pkg.entry.startsWith("./dist-opt/")
+		? existsSync(join(pkg.pkgDir, pkg.entry.replace(/^\.\//, "")))
+		: existsSync(join(pkg.pkgDir, "dist-opt", "index.js"));
 	const hasBackup = existsSync(join(pkg.pkgDir, "package.json.pi-orig"));
 	let state: PackageStatus["state"];
 	if (pkg.entry.startsWith("./dist-opt/")) state = distExists ? "optimized" : "broken";
@@ -322,8 +359,8 @@ export function getPackageStatus(pkg: PiPackage): PackageStatus {
 	return { name: pkg.name, entry: pkg.entry, state, distExists, hasBackup };
 }
 
-/** 源码树中最新的 .ts 修改时间（用于判断产物是否过期）。 */
-function latestSourceMtime(dir: string): number {
+/** 目录树中满足谓词文件的最新 mtime（用于判断产物是否过期）。 */
+function latestMtime(dir: string, match: (name: string) => boolean): number {
 	let latest = 0;
 	const walk = (d: string) => {
 		let names: string[];
@@ -342,7 +379,7 @@ function latestSourceMtime(dir: string): number {
 			}
 			if (st.isDirectory()) {
 				if (!SKIP_DIRS.has(n)) walk(full);
-			} else if (n.endsWith(".ts") && !n.endsWith(".d.ts")) {
+			} else if (match(n)) {
 				latest = Math.max(latest, st.mtimeMs);
 			}
 		}
@@ -355,7 +392,7 @@ function latestSourceMtime(dir: string): number {
  * 判断扩展是否需要（重新）build：
  * - 入口仍是 .ts → 需要（未优化）
  * - 入口是 dist-opt 但产物缺失 → 需要（broken）
- * - 源码树比产物入口新 → 需要（过期，扩展升级后旧产物还在）
+ * - 源码树比产物树（全部 .js，而非仅入口文件）新 → 需要（过期，扩展升级后旧产物还在）
  */
 export function extensionNeedsBuild(ext: OptimizableExtension): boolean {
 	if (!ext.optimized) return true;
@@ -364,7 +401,9 @@ export function extensionNeedsBuild(ext: OptimizableExtension): boolean {
 	const srcRoot = join(ext.pkgDir, ext.srcDir);
 	if (!existsSync(srcRoot)) return false;
 	try {
-		return latestSourceMtime(srcRoot) > statSync(targetFile).mtimeMs + 1000;
+		const srcMtime = latestMtime(srcRoot, (name) => name.endsWith(".ts") && !name.endsWith(".d.ts"));
+		const outMtime = latestMtime(join(ext.pkgDir, "dist-opt"), (name) => name.endsWith(".js"));
+		return srcMtime > outMtime + 1000;
 	} catch {
 		return false;
 	}

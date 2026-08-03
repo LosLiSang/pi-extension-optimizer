@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+// 与扩展主体共用解析逻辑，避免重复实现分叉（runner 与 dist/ 同包分发，必然存在）
+import { parseNpmName } from "./dist/scanner.js";
 
 function arg(name) {
   const index = process.argv.indexOf(name);
@@ -54,7 +56,7 @@ function collectRelativeDynamicImports(dir, acc = []) {
     let stat;
     try { stat = statSync(full); } catch { continue; }
     if (stat.isDirectory()) {
-      if (!["node_modules", "dist", "dist-opt", ".git"].includes(name)) collectRelativeDynamicImports(full, acc);
+      if (!["node_modules", "dist", "dist-opt", ".git", "coverage"].includes(name)) collectRelativeDynamicImports(full, acc);
     } else if (name.endsWith(".js")) {
       const code = readFileSync(full, "utf8");
       for (const m of code.matchAll(/import\s*\(\s*["'](\.[^"']+)["']\s*\)/g)) {
@@ -84,14 +86,7 @@ async function verifyDynamicChain(pkgDir, entryFile) {
 function npmName(value) {
   const source = typeof value === "string" ? value : value?.source;
   if (typeof source !== "string" || !source.startsWith("npm:")) return undefined;
-  const spec = source.slice(4);
-  if (spec.startsWith("@")) {
-    const slash = spec.indexOf("/");
-    const versionAt = slash >= 0 ? spec.indexOf("@", slash + 1) : -1;
-    return versionAt >= 0 ? spec.slice(0, versionAt) : spec;
-  }
-  const versionAt = spec.indexOf("@");
-  return versionAt >= 0 ? spec.slice(0, versionAt) : spec;
+  return parseNpmName(source.slice(4));
 }
 
 function installedPiPackages() {

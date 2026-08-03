@@ -3,6 +3,7 @@ import { join } from "node:path";
 function parseNpmName(spec) {
   if (spec.startsWith("@")) {
     const slash = spec.indexOf("/");
+    if (slash < 0) return spec;
     const at2 = spec.indexOf("@", slash + 1);
     return at2 >= 0 ? spec.slice(0, at2) : spec;
   }
@@ -82,7 +83,8 @@ function scanOptimizableExtensions(nmDir, exclude = []) {
       ...pkg,
       sourceEntry,
       srcDir: inferSrcDir(sourceEntry),
-      optimized: pkg.entry === "./dist-opt/index.js"
+      // 任何 dist-opt 入口都算已优化（不硬编码 index.js，非 index 入口同样适用）
+      optimized: pkg.entry.startsWith("./dist-opt/")
     }];
   });
 }
