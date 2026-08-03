@@ -4,6 +4,18 @@
   "description": "Pi package that precompiles TypeScript extensions to speed up startup, with status, rollback, and measurement commands.",
   "type": "module",
   "license": "MIT",
+  "author": {
+    "name": "LosLiSang",
+    "email": "2458607905@qq.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LosLiSang/pi-extension-optimizer.git"
+  },
+  "homepage": "https://github.com/LosLiSang/pi-extension-optimizer#readme",
+  "bugs": {
+    "url": "https://github.com/LosLiSang/pi-extension-optimizer/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -11,6 +23,10 @@
     "startup",
     "optimizer"
   ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
   "files": [
     "dist",
     "src",
@@ -36,5 +52,8 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
