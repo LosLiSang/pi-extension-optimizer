@@ -33,15 +33,26 @@ Pi loads every `.ts` extension through [jiti](https://github.com/unjs/jiti) at e
 
 ## 🚀 Installation
 
-```bash
-# from git (SSH key already set up on GitHub)
-pi install git:github.com/LosLiSang/pi-extension-optimizer
+### From npm (recommended)
 
-# or from a local checkout
-git clone https://github.com/LosLiSang/pi-extension-optimizer.git
-cd pi-extension-optimizer && npm install && npm run build
-pi install /absolute/path/to/pi-extension-optimizer
+```bash
+pi install npm:pi-extension-optimizer
 ```
+
+### From git
+
+```bash
+pi install git:github.com/LosLiSang/pi-extension-optimizer
+```
+
+### From a local checkout
+
+```bash
+git clone https://github.com/LosLiSang/pi-extension-optimizer.git
+pi install ./pi-extension-optimizer
+```
+
+(`dist/` is committed, so no build step is needed — `pi install` handles dependency installation. If you modify sources, run `npm install && npm run build` first.)
 
 Then restart Pi (or `/reload`) and run:
 

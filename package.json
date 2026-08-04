@@ -1,59 +1,64 @@
 {
-  "name": "pi-extension-optimizer",
-  "version": "0.1.2",
-  "description": "Pi package that precompiles TypeScript extensions to speed up startup, with status, rollback, and measurement commands.",
-  "type": "module",
-  "license": "MIT",
-  "author": {
-    "name": "LosLiSang",
-    "email": "2458607905@qq.com"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/LosLiSang/pi-extension-optimizer.git"
-  },
-  "homepage": "https://github.com/LosLiSang/pi-extension-optimizer#readme",
-  "bugs": {
-    "url": "https://github.com/LosLiSang/pi-extension-optimizer/issues"
-  },
-  "keywords": [
-    "pi-package",
-    "pi-extension",
-    "performance",
-    "startup",
-    "optimizer"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
-  "main": "./dist/index.js",
-  "files": [
-    "dist",
-    "src",
-    "scripts",
-    "measure-runner.mjs",
-    "README.md",
-    "LICENSE"
-  ],
-  "pi": {
-    "extensions": [
-      "./dist/index.js"
-    ]
-  },
-  "scripts": {
-    "build": "node scripts/build.mjs",
-    "prepare": "npm run build",
-    "typecheck": "tsc --noEmit",
-    "test:core": "npm run build && node scripts/test-core.mjs"
-  },
-  "dependencies": {
-    "esbuild": "^0.28.1"
-  },
-  "devDependencies": {
-    "@types/node": "^24.0.0",
-    "typescript": "^5.9.3"
-  },
-  "publishConfig": {
-    "access": "public"
-  }
+	"name": "pi-extension-optimizer",
+	"version": "0.1.3",
+	"description": "Precompile TypeScript Pi extensions into dist-opt/ .js so jiti skips transpilation at cold start (~13.2s → ~3.0s in the author setup). Auto-scans enabled extensions, backs up package.json before rewriting entries, creates harness junctions, and reports real startup cost.",
+	"type": "module",
+	"license": "MIT",
+	"author": {
+		"name": "LosLiSang",
+		"email": "2458607905@qq.com"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/LosLiSang/pi-extension-optimizer.git"
+	},
+	"homepage": "https://github.com/LosLiSang/pi-extension-optimizer#readme",
+	"bugs": {
+		"url": "https://github.com/LosLiSang/pi-extension-optimizer/issues"
+	},
+	"keywords": [
+		"pi",
+		"pi-extension",
+		"earendil",
+		"startup",
+		"performance",
+		"typescript",
+		"precompile",
+		"jiti",
+		"esbuild",
+		"optimizer"
+	],
+	"engines": {
+		"node": ">=20"
+	},
+	"main": "./dist/index.js",
+	"files": [
+		"dist",
+		"src",
+		"scripts",
+		"measure-runner.mjs",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./dist/index.js"
+		]
+	},
+	"scripts": {
+		"build": "node scripts/build.mjs",
+		"prepare": "npm run build",
+		"typecheck": "tsc --noEmit",
+		"test:core": "npm run build && node scripts/test-core.mjs"
+	},
+	"dependencies": {
+		"esbuild": "^0.28.1"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"typescript": "^5.9.3"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
 }
