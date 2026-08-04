@@ -17,6 +17,13 @@ import type { OptimizableExtension, PiPackage } from "./scanner.js";
 const SKIP_DIRS = new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
 
+export interface JunctionResult {
+	/** 本次新创建/修复的链接名 */
+	created: string[];
+	/** 创建/修复失败的原因（非致命：静态链仍由 jiti alias 处理，但运行时动态 import() 会失败） */
+	warnings: string[];
+}
+
 /**
  * 在 pi 的 node_modules 根创建 harness 包 junction（@earendil-works/pi-coding-agent 等 → 真实 harness）。
  * 这样产物保留 bare import：静态链由 jiti alias 处理（性能 = 原 .ts 加载），
@@ -26,9 +33,10 @@ const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\
  * 目标不存在的（如扁平安装下无嵌套 pi-ai）不创建悬空 junction。
  * harness 参数仅测试注入用，默认取 realHarnessDir()。
  */
-export function ensureHarnessJunctions(nm: string, harness: string = realHarnessDir()): string[] {
+export function ensureHarnessJunctions(nm: string, harness: string = realHarnessDir()): JunctionResult {
 	const nestedRoot = join(harness, "node_modules", "@earendil-works");
 	const created: string[] = [];
+	const warnings: string[] = [];
 	// pi-ai / pi-agent-core 是 pi-coding-agent 包内 node_modules 下的嵌套包
 	const targets: Array<[string, string]> = [
 		["@earendil-works/pi-coding-agent", harness],
@@ -50,20 +58,22 @@ export function ensureHarnessJunctions(nm: string, harness: string = realHarness
 				// Windows 上 broken junction 必须用 unlinkSync 删链接本身；
 				// rmSync 会静默保留链接（且递归删除有跟随 junction 误删目标的风险）。
 				unlinkSync(link);
-			} catch {
-				continue; // 无法移除则放弃，静态链仍由 jiti alias 处理
+			} catch (error) {
+				warnings.push(`${name}: 损坏的链接无法移除（${(error as Error).message}），动态 import() 可能解析失败`);
+				continue;
 			}
 		}
-		if (!existsSync(target)) continue; // 目标不存在：不创建悬空 junction
+		if (!existsSync(target)) continue; // 目标不存在：不创建悬空 junction（扁平安装属正常布局，不算警告）
 		try {
 			mkdirSync(dirname(link), { recursive: true });
 			symlinkSync(target, link, "junction");
 			created.push(name);
-		} catch {
-			// 无权限等场景：降级（静态链仍由 jiti alias 处理）
+		} catch (error) {
+			// 典型原因：Windows 无管理员权限且未开开发者模式
+			warnings.push(`${name}: 创建 junction 失败（${(error as Error).message}），运行时动态 import() 会报 Cannot find package；请以管理员运行或开启开发者模式后重新 build`);
 		}
 	}
-	return created;
+	return { created, warnings };
 }
 
 /** 由原始入口推导优化后入口：./src/index.ts -> ./dist-opt/index.js；x.ts -> ./dist-opt/x.js */
@@ -269,6 +279,8 @@ export interface BuildResult {
 	total: number;
 	applyMessage: string;
 	errors: string[];
+	/** junction 创建/修复失败的警告（不影响编译结果，但运行时动态 import() 可能失败） */
+	junctionWarnings: string[];
 }
 
 export interface PackageStatus {
@@ -308,11 +320,11 @@ export async function buildOne(ext: OptimizableExtension): Promise<BuildResult> 
 	const errors: string[] = [];
 	const srcRoot = join(ext.pkgDir, ext.srcDir);
 	if (!existsSync(srcRoot)) {
-		return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `源码目录不存在: ${srcRoot}`, errors };
+		return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `源码目录不存在: ${srcRoot}`, errors, junctionWarnings: [] };
 	}
 	// 确保 harness junction 存在：产物保留 bare import，动态链依赖 junction 解析
 	const nm = nodeModulesRootOf(ext.pkgDir);
-	ensureHarnessJunctions(nm);
+	const junctions = ensureHarnessJunctions(nm);
 	const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
 	// 递归转译产物中 .ts 分发的依赖包（native 动态链需要 .js）
 	await transpileDotTsDeps(ext, nm, new Map(), errors);
@@ -335,6 +347,7 @@ export async function buildOne(ext: OptimizableExtension): Promise<BuildResult> 
 		total: compiled.total,
 		applyMessage,
 		errors,
+		junctionWarnings: junctions.warnings,
 	};
 }
 

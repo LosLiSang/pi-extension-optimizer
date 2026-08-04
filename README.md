@@ -58,6 +58,7 @@ Then restart Pi (or `/reload`) and run:
 | `/ext-opt status` | Show `optimized / TypeScript / native JS / broken` per package |
 | `/ext-opt measure` | Time the real module-import phase in a clean child process |
 | `/ext-opt rollback` | Restore every `package.json` from its `.pi-orig` backup |
+| `/ext-opt rollback <name>` | Roll back a single package |
 
 Non-interactive mutation commands accept `--yes`:
 
@@ -101,9 +102,11 @@ Pi startup:
 
 Pi package updates or npm reinstalls replace extension directories, reverting entries to `.ts`. Just run **`/ext-opt build`** again — automatic scanning re-optimizes everything (the build also re-creates any missing junctions).
 
+> ⚠️ **Junction permissions (Windows):** creating junctions requires administrator rights or Developer Mode. If creation fails, the build itself still succeeds (static imports are handled by jiti aliases), but runtime dynamic `import()` of harness packages will fail with `Cannot find package`. Such failures are now surfaced as warnings in the build result — run pi elevated or enable Developer Mode, then rebuild.
+
 ## ↩️ Rollback
 
-`/ext-opt rollback` restores every currently optimized package from its `.pi-orig` backup. `dist-opt/` files remain on disk but are no longer referenced.
+`/ext-opt rollback` restores every currently optimized package from its `.pi-orig` backup; `/ext-opt rollback <name>` targets a single package. `dist-opt/` files remain on disk but are no longer referenced.
 
 ## 🔒 Safety
 

@@ -70,11 +70,16 @@ async function handleBuild(args, ctx) {
   }
   const succeeded = results.filter((result) => result.ok).length;
   const failed = results.length - succeeded;
+  const junctionWarnings = [...new Set(results.flatMap((result) => result.junctionWarnings))];
   await showLines(ctx, `\u6784\u5EFA\u7ED3\u679C\uFF1A${succeeded} \u6210\u529F / ${failed} \u5931\u8D25`, results.map((result) => {
     const icon = result.ok ? "\u2705" : "\u274C";
     const error = result.errors[0] ? `\uFF1B${result.errors[0]}` : "";
-    return `${icon} ${result.name}: ${result.files}/${result.total} files\uFF1B${result.applyMessage}${error}`;
+    const junction = result.junctionWarnings.length > 0 ? "\uFF1B\u26A0\uFE0F junction \u8B66\u544A" : "";
+    return `${icon} ${result.name}: ${result.files}/${result.total} files\uFF1B${result.applyMessage}${error}${junction}`;
   }));
+  if (junctionWarnings.length > 0) {
+    await showLines(ctx, `\u26A0\uFE0F junction \u8B66\u544A\uFF08${junctionWarnings.length}\uFF09\uFF1A\u9759\u6001\u5BFC\u5165\u4E0D\u53D7\u5F71\u54CD\uFF0C\u4F46\u8FD0\u884C\u65F6\u52A8\u6001 import() \u53EF\u80FD\u5931\u8D25`, junctionWarnings);
+  }
   ctx.ui.notify(`\u4F18\u5316\u5B8C\u6210\uFF1A${succeeded} \u6210\u529F\uFF0C${failed} \u5931\u8D25\u3002`, failed > 0 ? "warning" : "success");
   if (failed === 0 && ctx.hasUI && await ctx.ui.confirm("\u4F18\u5316\u5DF2\u5B8C\u6210", "\u7ACB\u5373 reload\uFF0C\u4F7F\u65B0\u5165\u53E3\u5728\u5F53\u524D\u8FDB\u7A0B\u751F\u6548\uFF1F")) {
     await ctx.reload();
@@ -117,12 +122,22 @@ async function handleStatus(ctx) {
   );
 }
 async function handleRollback(args, ctx) {
+  const parts = args.split(/\s+/).filter(Boolean);
+  const nameArg = parts.slice(1).find((part) => !part.startsWith("--"));
   const enabled = enabledNpmPackageNames(agentDir());
   const packages = scanPiExtensions(agentNodeModules(), [PACKAGE_NAME]).filter((pkg) => enabled.has(pkg.name));
-  const targets = packages.filter((pkg) => {
+  let targets = packages.filter((pkg) => {
     const status = getPackageStatus(pkg);
     return status.hasBackup && pkg.entry.startsWith("./dist-opt/");
   });
+  if (nameArg) {
+    const match = targets.filter((pkg) => pkg.name === nameArg);
+    if (match.length === 0) {
+      ctx.ui.notify(`\u6CA1\u6709\u53EF\u56DE\u6EDA\u7684\u6269\u5C55\uFF1A${nameArg}\uFF08\u9700\u5DF2\u4F18\u5316\u4E14\u5B58\u5728 package.json.pi-orig \u5907\u4EFD\uFF09\u3002\u5F53\u524D\u53EF\u56DE\u6EDA\uFF1A${targets.map((pkg) => pkg.name).join(", ") || "\u65E0"}`, "warning");
+      return;
+    }
+    targets = match;
+  }
   if (targets.length === 0) {
     ctx.ui.notify("\u6CA1\u6709\u53D1\u73B0\u53EF\u56DE\u6EDA\u7684\u5DF2\u4F18\u5316\u6269\u5C55\u3002", "info");
     return;
@@ -166,7 +181,8 @@ async function handleHelp(ctx) {
     "/ext-opt build --if-needed \u2014 \u53EA\u91CD\u5EFA\u672A\u4F18\u5316/\u4EA7\u7269\u7F3A\u5931/\u6E90\u7801\u8FC7\u671F\u7684\u5305",
     "/ext-opt status    \u2014 \u67E5\u770B optimized / TypeScript / native JS / broken \u72B6\u6001",
     "/ext-opt measure   \u2014 \u5728\u72EC\u7ACB\u5B50\u8FDB\u7A0B\u4E2D\u590D\u523B\u771F\u5B9E loader \u6D4B module import",
-    "/ext-opt rollback  \u2014 \u4ECE package.json.pi-orig \u6062\u590D\u539F\u5165\u53E3",
+    "/ext-opt rollback  \u2014 \u4ECE package.json.pi-orig \u6062\u590D\u539F\u5165\u53E3\uFF08\u9ED8\u8BA4\u5168\u90E8\uFF09",
+    "/ext-opt rollback <name> \u2014 \u53EA\u56DE\u6EDA\u6307\u5B9A\u5305",
     "build/rollback \u53EF\u52A0 --yes \u8DF3\u8FC7\u786E\u8BA4\uFF08\u7528\u4E8E\u975E\u4EA4\u4E92\u6A21\u5F0F\uFF09",
     "\u5347\u7EA7\u6269\u5C55\u540E\u91CD\u65B0\u8FD0\u884C /ext-opt build \u5373\u53EF\u6062\u590D\u4F18\u5316\u3002"
   ]);

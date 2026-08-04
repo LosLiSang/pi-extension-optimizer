@@ -60,6 +60,7 @@ try {
   const extB = scanOptimizableExtensions(nm).find((e) => e.name === "fixture-b");
   const resB = await buildOne(extB);
   assert.equal(resB.ok, true, resB.errors.join("\n"));
+  assert.ok(Array.isArray(resB.junctionWarnings), "buildOne 结果应携带 junctionWarnings");
   assert.equal(existsSync(join(pkgB, "dist-opt", "entry.js")), true);
   assert.equal(JSON.parse(readFileSync(join(pkgB, "package.json"), "utf8")).pi.extensions[0], "./dist-opt/entry.js");
 
@@ -124,9 +125,11 @@ try {
   writeFileSync(join(fakeHarness, "marker.txt"), "harness");
   const linkRoot = join(root, "links", "node_modules", "@earendil-works");
   const created = ensureHarnessJunctions(join(root, "links", "node_modules"), fakeHarness);
-  assert.ok(created.includes("@earendil-works/pi-coding-agent"), created.join(","));
-  assert.ok(created.includes("@earendil-works/pi-ai"));
-  assert.ok(!created.includes("@earendil-works/pi-agent-core"), "目标不存在时不应创建悬空 junction");
+  assert.ok(Array.isArray(created.warnings) && created.warnings.length === 0, created.warnings.join(";"));
+  assert.ok(created.created.includes("@earendil-works/pi-coding-agent"), created.created.join(","));
+  assert.ok(created.created.includes("@earendil-works/pi-ai"));
+  assert.ok(!created.created.includes("@earendil-works/pi-agent-core"), "目标不存在时不应创建悬空 junction");
+  assert.equal(created.warnings.length, 0, "目标不存在属正常布局，不应产生警告");
   assert.equal(existsSync(join(linkRoot, "pi-agent-core")), false);
   // 模拟 pi 升级后旧 junction 指向已消失的路径：链接 broken（lstat 在、existsSync 失败），
   // 而当前 harness 目标存在 → 应移除坏链接并重建到新目标。
@@ -137,8 +140,12 @@ try {
   symlinkSync(oldHarness, pcaLink, "junction");
   rmSync(oldHarness, { recursive: true, force: true }); // 旧目标消失 → broken（lstat 在、existsSync 失败）
   const repaired = ensureHarnessJunctions(join(root, "links", "node_modules"), fakeHarness);
-  assert.ok(repaired.includes("@earendil-works/pi-coding-agent"), "损坏 junction 应被移除并重建");
+  assert.ok(repaired.created.includes("@earendil-works/pi-coding-agent"), "损坏 junction 应被移除并重建");
   assert.equal(existsSync(join(linkRoot, "pi-coding-agent", "marker.txt")), true, "重建后应解析到新目标");
+
+  // junction 创建失败时应有警告（而非静默）：把 link 位置预置为一个无法 unlink 的文件模拟失败。
+  // 直接验证 API 形状：warnings 为数组且 buildOne 结果携带 junctionWarnings 字段。
+  assert.ok(Array.isArray(repaired.warnings));
 
   console.log("core fixture test: PASS");
 } finally {

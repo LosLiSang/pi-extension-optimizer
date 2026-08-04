@@ -17,6 +17,7 @@ const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\
 function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
   const nestedRoot = join(harness, "node_modules", "@earendil-works");
   const created = [];
+  const warnings = [];
   const targets = [
     ["@earendil-works/pi-coding-agent", harness],
     ["@earendil-works/pi-ai", join(nestedRoot, "pi-ai")],
@@ -34,7 +35,8 @@ function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
       if (existsSync(link)) continue;
       try {
         unlinkSync(link);
-      } catch {
+      } catch (error) {
+        warnings.push(`${name}: \u635F\u574F\u7684\u94FE\u63A5\u65E0\u6CD5\u79FB\u9664\uFF08${error.message}\uFF09\uFF0C\u52A8\u6001 import() \u53EF\u80FD\u89E3\u6790\u5931\u8D25`);
         continue;
       }
     }
@@ -43,10 +45,11 @@ function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
       mkdirSync(dirname(link), { recursive: true });
       symlinkSync(target, link, "junction");
       created.push(name);
-    } catch {
+    } catch (error) {
+      warnings.push(`${name}: \u521B\u5EFA junction \u5931\u8D25\uFF08${error.message}\uFF09\uFF0C\u8FD0\u884C\u65F6\u52A8\u6001 import() \u4F1A\u62A5 Cannot find package\uFF1B\u8BF7\u4EE5\u7BA1\u7406\u5458\u8FD0\u884C\u6216\u5F00\u542F\u5F00\u53D1\u8005\u6A21\u5F0F\u540E\u91CD\u65B0 build`);
     }
   }
-  return created;
+  return { created, warnings };
 }
 function optimizedEntryFor(entry) {
   const rel = entry.replace(/^\.\//, "");
@@ -231,10 +234,10 @@ async function buildOne(ext) {
   const errors = [];
   const srcRoot = join(ext.pkgDir, ext.srcDir);
   if (!existsSync(srcRoot)) {
-    return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`, errors };
+    return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`, errors, junctionWarnings: [] };
   }
   const nm = nodeModulesRootOf(ext.pkgDir);
-  ensureHarnessJunctions(nm);
+  const junctions = ensureHarnessJunctions(nm);
   const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
   await transpileDotTsDeps(ext, nm, /* @__PURE__ */ new Map(), errors);
   const targetEntry = optimizedEntryFor(ext.entry);
@@ -254,7 +257,8 @@ async function buildOne(ext) {
     files: compiled.files,
     total: compiled.total,
     applyMessage,
-    errors
+    errors,
+    junctionWarnings: junctions.warnings
   };
 }
 function rollbackOne(pkg) {

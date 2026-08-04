@@ -79,11 +79,17 @@ async function handleBuild(args: string, ctx: any) {
 
 	const succeeded = results.filter((result) => result.ok).length;
 	const failed = results.length - succeeded;
+	const junctionWarnings = [...new Set(results.flatMap((result) => result.junctionWarnings))];
 	await showLines(ctx, `构建结果：${succeeded} 成功 / ${failed} 失败`, results.map((result) => {
 		const icon = result.ok ? "✅" : "❌";
 		const error = result.errors[0] ? `；${result.errors[0]}` : "";
-		return `${icon} ${result.name}: ${result.files}/${result.total} files；${result.applyMessage}${error}`;
+		const junction = result.junctionWarnings.length > 0 ? "；⚠️ junction 警告" : "";
+		return `${icon} ${result.name}: ${result.files}/${result.total} files；${result.applyMessage}${error}${junction}`;
 	}));
+	if (junctionWarnings.length > 0) {
+		// 非致命：静态链由 jiti alias 处理不受影响，但运行时动态 import() 会失败，必须提示用户
+		await showLines(ctx, `⚠️ junction 警告（${junctionWarnings.length}）：静态导入不受影响，但运行时动态 import() 可能失败`, junctionWarnings);
+	}
 
 	ctx.ui.notify(`优化完成：${succeeded} 成功，${failed} 失败。`, failed > 0 ? "warning" : "success");
 	if (failed === 0 && ctx.hasUI && await ctx.ui.confirm("优化已完成", "立即 reload，使新入口在当前进程生效？")) {
@@ -131,12 +137,22 @@ async function handleStatus(ctx: any) {
 }
 
 async function handleRollback(args: string, ctx: any) {
+	const parts = args.split(/\s+/).filter(Boolean);
+	const nameArg = parts.slice(1).find((part) => !part.startsWith("--"));
 	const enabled = enabledNpmPackageNames(agentDir());
 	const packages = scanPiExtensions(agentNodeModules(), [PACKAGE_NAME]).filter((pkg) => enabled.has(pkg.name));
-	const targets = packages.filter((pkg) => {
+	let targets = packages.filter((pkg) => {
 		const status = getPackageStatus(pkg);
 		return status.hasBackup && pkg.entry.startsWith("./dist-opt/");
 	});
+	if (nameArg) {
+		const match = targets.filter((pkg) => pkg.name === nameArg);
+		if (match.length === 0) {
+			ctx.ui.notify(`没有可回滚的扩展：${nameArg}（需已优化且存在 package.json.pi-orig 备份）。当前可回滚：${targets.map((pkg) => pkg.name).join(", ") || "无"}`, "warning");
+			return;
+		}
+		targets = match;
+	}
 	if (targets.length === 0) {
 		ctx.ui.notify("没有发现可回滚的已优化扩展。", "info");
 		return;
@@ -184,7 +200,8 @@ async function handleHelp(ctx: any) {
 		"/ext-opt build --if-needed — 只重建未优化/产物缺失/源码过期的包",
 		"/ext-opt status    — 查看 optimized / TypeScript / native JS / broken 状态",
 		"/ext-opt measure   — 在独立子进程中复刻真实 loader 测 module import",
-		"/ext-opt rollback  — 从 package.json.pi-orig 恢复原入口",
+		"/ext-opt rollback  — 从 package.json.pi-orig 恢复原入口（默认全部）",
+		"/ext-opt rollback <name> — 只回滚指定包",
 		"build/rollback 可加 --yes 跳过确认（用于非交互模式）",
 		"升级扩展后重新运行 /ext-opt build 即可恢复优化。",
 	]);
