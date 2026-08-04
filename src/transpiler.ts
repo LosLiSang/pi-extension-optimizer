@@ -20,8 +20,28 @@ const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\
 export interface JunctionResult {
 	/** 本次新创建/修复的链接名 */
 	created: string[];
-	/** 创建/修复失败的原因（非致命：静态链仍由 jiti alias 处理，但运行时动态 import() 会失败） */
+	/** 创建/修复失败的原因（非致命：静态链仍由 jiti alias 处理，但原生加载的子树里裸导入会失败） */
 	warnings: string[];
+}
+
+export interface JunctionState {
+	name: string;
+	ok: boolean;
+	/** 不健康时的原因描述 */
+	reason?: string;
+}
+
+/**
+ * 需要建 junction 的 harness 包及其目标（真实 harness 目录或其 node_modules 下的嵌套包）。
+ * pi-ai / pi-agent-core 是 pi-coding-agent 包内 node_modules 下的嵌套包。
+ */
+export function harnessJunctionTargets(harness: string): Array<[string, string]> {
+	const nestedRoot = join(harness, "node_modules", "@earendil-works");
+	return [
+		["@earendil-works/pi-coding-agent", harness],
+		["@earendil-works/pi-ai", join(nestedRoot, "pi-ai")],
+		["@earendil-works/pi-agent-core", join(nestedRoot, "pi-agent-core")],
+	];
 }
 
 /**
@@ -34,16 +54,9 @@ export interface JunctionResult {
  * harness 参数仅测试注入用，默认取 realHarnessDir()。
  */
 export function ensureHarnessJunctions(nm: string, harness: string = realHarnessDir()): JunctionResult {
-	const nestedRoot = join(harness, "node_modules", "@earendil-works");
 	const created: string[] = [];
 	const warnings: string[] = [];
-	// pi-ai / pi-agent-core 是 pi-coding-agent 包内 node_modules 下的嵌套包
-	const targets: Array<[string, string]> = [
-		["@earendil-works/pi-coding-agent", harness],
-		["@earendil-works/pi-ai", join(nestedRoot, "pi-ai")],
-		["@earendil-works/pi-agent-core", join(nestedRoot, "pi-agent-core")],
-	];
-	for (const [name, target] of targets) {
+	for (const [name, target] of harnessJunctionTargets(harness)) {
 		const link = join(nm, name);
 		let hasLink = false;
 		try {
@@ -74,6 +87,34 @@ export function ensureHarnessJunctions(nm: string, harness: string = realHarness
 		}
 	}
 	return { created, warnings };
+}
+
+/**
+ * 检查三个 harness junction 的当前健康状态（不修改文件系统）。
+ * 用于 /ext-opt status 展示与 repair 前的诊断。
+ */
+export function checkHarnessJunctions(nm: string, harness: string = realHarnessDir()): JunctionState[] {
+	const states: JunctionState[] = [];
+	for (const [name, target] of harnessJunctionTargets(harness)) {
+		const link = join(nm, name);
+		let hasLink = false;
+		try {
+			lstatSync(link);
+			hasLink = true;
+		} catch {
+			// 链接不存在
+		}
+		if (hasLink) {
+			states.push(existsSync(link)
+				? { name, ok: true }
+				: { name, ok: false, reason: "损坏的链接（目标不可解析），将在下次扩展加载时自动修复" });
+		} else {
+			states.push(existsSync(target)
+				? { name, ok: false, reason: "缺失（npm 重审计会清除锁文件外的链接），将在下次扩展加载时自动修复" }
+				: { name, ok: false, reason: "目标不存在（扁平安装属正常布局，无需 junction）" });
+		}
+	}
+	return states;
 }
 
 /** 由原始入口推导优化后入口：./src/index.ts -> ./dist-opt/index.js；x.ts -> ./dist-opt/x.js */
@@ -272,6 +313,72 @@ async function transpileDotTsDeps(
 	}
 }
 
+/**
+ * 把产物中三个 harness 包（pi-coding-agent / pi-ai / pi-agent-core）的裸导入改写成 file URL。
+ * 与 pi loader 的 getAliases() 相同的解析逻辑（workspace 优先，否则从 harness 目录 require.resolve），
+ * 保证改写后的入口与运行时 jiti alias 完全一致。
+ *
+ * 为什么要改写：这些包不在 pi 的 node_modules 里，原生加载子树（纯 JS ESM 被 jiti 交给原生 import()
+ * 后的整棵子树）的裸导入走 Node ESM 解析，只能依赖 junction；而 npm 重审计会把 junction 当 extraneous 清掉，
+ * 导致 /tool-display 等命令在运行时抛 Cannot find package。改写成 file URL 后，
+ * 无论 junction 是否存在、npm 是否清理，原生子树都能直接解析到真实 harness，彻底消除这类错误。
+ * junction + 启动自愈仍保留，作为旧产物与子路径导入的兜底。
+ */
+export function rewriteHarnessImports(outRoot: string, harness: string): string[] {
+	const warnings: string[] = [];
+	const packagesRoot = dirname(harness);
+	/** 按 import 条件解析嵌套包入口（与 pi loader import.meta.resolve 语义一致） */
+	const resolveNestedEntry = (pkgDir: string, subpath?: string): string | undefined => {
+		try {
+			const pj = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+			const ex = pj?.exports;
+			const key = subpath ? `./${subpath}` : ".";
+			let entry: unknown;
+			if (ex && typeof ex === "object") {
+				const target = (ex as any)[key];
+				if (typeof target === "string") entry = target;
+				else if (target && typeof target === "object") {
+					const imp = target.import;
+					entry = typeof imp === "string" ? imp
+						: imp && typeof imp === "object" && typeof imp.default === "string" ? imp.default
+						: typeof target.default === "string" ? target.default
+						: undefined;
+				}
+			} else if (typeof pj?.main === "string") {
+				entry = pj.main;
+			}
+			if (typeof entry === "string") return join(pkgDir, entry.replace(/^\.\//, ""));
+		} catch {
+			// 解析失败则返回 undefined
+		}
+		return undefined;
+	};
+	const workspaceOrImport = (pkgDir: string, workspaceRel: string, subpath?: string): string | undefined => {
+		const ws = join(packagesRoot, workspaceRel);
+		if (existsSync(ws)) return ws;
+		return resolveNestedEntry(pkgDir, subpath);
+	};
+	const nested = join(harness, "node_modules", "@earendil-works");
+	// name → 入口（与 pi getAliases 的 pi-coding-agent/pi-ai/pi-agent-core 三项一致）
+	const entries: Array<[string, string | undefined]> = [
+		["@earendil-works/pi-coding-agent", join(harness, "dist", "index.js")],
+		["@earendil-works/pi-ai", workspaceOrImport(join(nested, "pi-ai"), "ai/dist/compat.js", "compat")],
+		["@earendil-works/pi-agent-core", workspaceOrImport(join(nested, "pi-agent-core"), "agent/dist/index.js")],
+	];
+	for (const [name, entry] of entries) {
+		if (!entry) {
+			warnings.push(`${name}: 无法解析 harness 入口，产物保留裸导入（依赖 junction 兜底）`);
+			continue;
+		}
+		if (!existsSync(entry)) {
+			warnings.push(`${name}: harness 入口不存在（${entry}），产物保留裸导入（依赖 junction 兜底）`);
+			continue;
+		}
+		rewriteBareImportInTree(outRoot, name, pathToFileURL(entry).href);
+	}
+	return warnings;
+}
+
 export interface BuildResult {
 	name: string;
 	ok: boolean;
@@ -281,6 +388,8 @@ export interface BuildResult {
 	errors: string[];
 	/** junction 创建/修复失败的警告（不影响编译结果，但运行时动态 import() 可能失败） */
 	junctionWarnings: string[];
+	/** harness 裸导入改写失败/被跳过的警告（产物保留裸导入，依赖 junction 兜底） */
+	rewriteWarnings: string[];
 }
 
 export interface PackageStatus {
@@ -320,14 +429,16 @@ export async function buildOne(ext: OptimizableExtension): Promise<BuildResult> 
 	const errors: string[] = [];
 	const srcRoot = join(ext.pkgDir, ext.srcDir);
 	if (!existsSync(srcRoot)) {
-		return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `源码目录不存在: ${srcRoot}`, errors, junctionWarnings: [] };
+		return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `源码目录不存在: ${srcRoot}`, errors, junctionWarnings: [], rewriteWarnings: [] };
 	}
-	// 确保 harness junction 存在：产物保留 bare import，动态链依赖 junction 解析
+	// 确保 harness junction 存在：旧产物/子路径导入仍依赖 junction 解析；新产物已把 harness 裸导入改写为 file URL
 	const nm = nodeModulesRootOf(ext.pkgDir);
 	const junctions = ensureHarnessJunctions(nm);
 	const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
 	// 递归转译产物中 .ts 分发的依赖包（native 动态链需要 .js）
 	await transpileDotTsDeps(ext, nm, new Map(), errors);
+	// harness 裸导入 → file URL：原生加载子树不再依赖 junction（npm 重审计清掉 junction 也不受影响）
+	const rewriteWarnings = rewriteHarnessImports(join(ext.pkgDir, "dist-opt"), realHarnessDir());
 
 	const targetEntry = optimizedEntryFor(ext.entry);
 	const targetFile = join(ext.pkgDir, targetEntry.replace(/^\.\//, ""));
@@ -348,6 +459,7 @@ export async function buildOne(ext: OptimizableExtension): Promise<BuildResult> 
 		applyMessage,
 		errors,
 		junctionWarnings: junctions.warnings,
+		rewriteWarnings,
 	};
 }
 

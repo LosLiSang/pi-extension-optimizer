@@ -14,16 +14,18 @@ import { pathToFileURL } from "node:url";
 import { realHarnessDir } from "./paths.js";
 const SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
-function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
+function harnessJunctionTargets(harness) {
   const nestedRoot = join(harness, "node_modules", "@earendil-works");
-  const created = [];
-  const warnings = [];
-  const targets = [
+  return [
     ["@earendil-works/pi-coding-agent", harness],
     ["@earendil-works/pi-ai", join(nestedRoot, "pi-ai")],
     ["@earendil-works/pi-agent-core", join(nestedRoot, "pi-agent-core")]
   ];
-  for (const [name, target] of targets) {
+}
+function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
+  const created = [];
+  const warnings = [];
+  for (const [name, target] of harnessJunctionTargets(harness)) {
     const link = join(nm, name);
     let hasLink = false;
     try {
@@ -50,6 +52,24 @@ function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
     }
   }
   return { created, warnings };
+}
+function checkHarnessJunctions(nm, harness = realHarnessDir()) {
+  const states = [];
+  for (const [name, target] of harnessJunctionTargets(harness)) {
+    const link = join(nm, name);
+    let hasLink = false;
+    try {
+      lstatSync(link);
+      hasLink = true;
+    } catch {
+    }
+    if (hasLink) {
+      states.push(existsSync(link) ? { name, ok: true } : { name, ok: false, reason: "\u635F\u574F\u7684\u94FE\u63A5\uFF08\u76EE\u6807\u4E0D\u53EF\u89E3\u6790\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" });
+    } else {
+      states.push(existsSync(target) ? { name, ok: false, reason: "\u7F3A\u5931\uFF08npm \u91CD\u5BA1\u8BA1\u4F1A\u6E05\u9664\u9501\u6587\u4EF6\u5916\u7684\u94FE\u63A5\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" } : { name, ok: false, reason: "\u76EE\u6807\u4E0D\u5B58\u5728\uFF08\u6241\u5E73\u5B89\u88C5\u5C5E\u6B63\u5E38\u5E03\u5C40\uFF0C\u65E0\u9700 junction\uFF09" });
+    }
+  }
+  return states;
 }
 function optimizedEntryFor(entry) {
   const rel = entry.replace(/^\.\//, "");
@@ -213,6 +233,54 @@ async function transpileDotTsDeps(ext, nm, visited, errors) {
     }
   }
 }
+function rewriteHarnessImports(outRoot, harness) {
+  const warnings = [];
+  const packagesRoot = dirname(harness);
+  const resolveNestedEntry = (pkgDir, subpath) => {
+    try {
+      const pj = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+      const ex = pj?.exports;
+      const key = subpath ? `./${subpath}` : ".";
+      let entry;
+      if (ex && typeof ex === "object") {
+        const target = ex[key];
+        if (typeof target === "string") entry = target;
+        else if (target && typeof target === "object") {
+          const imp = target.import;
+          entry = typeof imp === "string" ? imp : imp && typeof imp === "object" && typeof imp.default === "string" ? imp.default : typeof target.default === "string" ? target.default : void 0;
+        }
+      } else if (typeof pj?.main === "string") {
+        entry = pj.main;
+      }
+      if (typeof entry === "string") return join(pkgDir, entry.replace(/^\.\//, ""));
+    } catch {
+    }
+    return void 0;
+  };
+  const workspaceOrImport = (pkgDir, workspaceRel, subpath) => {
+    const ws = join(packagesRoot, workspaceRel);
+    if (existsSync(ws)) return ws;
+    return resolveNestedEntry(pkgDir, subpath);
+  };
+  const nested = join(harness, "node_modules", "@earendil-works");
+  const entries = [
+    ["@earendil-works/pi-coding-agent", join(harness, "dist", "index.js")],
+    ["@earendil-works/pi-ai", workspaceOrImport(join(nested, "pi-ai"), "ai/dist/compat.js", "compat")],
+    ["@earendil-works/pi-agent-core", workspaceOrImport(join(nested, "pi-agent-core"), "agent/dist/index.js")]
+  ];
+  for (const [name, entry] of entries) {
+    if (!entry) {
+      warnings.push(`${name}: \u65E0\u6CD5\u89E3\u6790 harness \u5165\u53E3\uFF0C\u4EA7\u7269\u4FDD\u7559\u88F8\u5BFC\u5165\uFF08\u4F9D\u8D56 junction \u515C\u5E95\uFF09`);
+      continue;
+    }
+    if (!existsSync(entry)) {
+      warnings.push(`${name}: harness \u5165\u53E3\u4E0D\u5B58\u5728\uFF08${entry}\uFF09\uFF0C\u4EA7\u7269\u4FDD\u7559\u88F8\u5BFC\u5165\uFF08\u4F9D\u8D56 junction \u515C\u5E95\uFF09`);
+      continue;
+    }
+    rewriteBareImportInTree(outRoot, name, pathToFileURL(entry).href);
+  }
+  return warnings;
+}
 function applyOne(ext) {
   const packageJsonPath = join(ext.pkgDir, "package.json");
   const backupPath = `${packageJsonPath}.pi-orig`;
@@ -234,12 +302,13 @@ async function buildOne(ext) {
   const errors = [];
   const srcRoot = join(ext.pkgDir, ext.srcDir);
   if (!existsSync(srcRoot)) {
-    return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`, errors, junctionWarnings: [] };
+    return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`, errors, junctionWarnings: [], rewriteWarnings: [] };
   }
   const nm = nodeModulesRootOf(ext.pkgDir);
   const junctions = ensureHarnessJunctions(nm);
   const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
   await transpileDotTsDeps(ext, nm, /* @__PURE__ */ new Map(), errors);
+  const rewriteWarnings = rewriteHarnessImports(join(ext.pkgDir, "dist-opt"), realHarnessDir());
   const targetEntry = optimizedEntryFor(ext.entry);
   const targetFile = join(ext.pkgDir, targetEntry.replace(/^\.\//, ""));
   const productOk = errors.length === 0 && existsSync(targetFile);
@@ -258,7 +327,8 @@ async function buildOne(ext) {
     total: compiled.total,
     applyMessage,
     errors,
-    junctionWarnings: junctions.warnings
+    junctionWarnings: junctions.warnings,
+    rewriteWarnings
   };
 }
 function rollbackOne(pkg) {
@@ -321,9 +391,12 @@ function extensionNeedsBuild(ext) {
 export {
   applyOne,
   buildOne,
+  checkHarnessJunctions,
   ensureHarnessJunctions,
   extensionNeedsBuild,
   getPackageStatus,
+  harnessJunctionTargets,
   optimizedEntryFor,
+  rewriteHarnessImports,
   rollbackOne
 };
