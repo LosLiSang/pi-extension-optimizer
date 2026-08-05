@@ -21,13 +21,26 @@ function isHarnessDir(candidate) {
   }
 }
 function harnessFromExecPath() {
-  const candidate = join(dirname(process.execPath), "node_modules", "@earendil-works", "pi-coding-agent");
-  return isHarnessDir(candidate) ? candidate : void 0;
+  const binDir = dirname(process.execPath);
+  const prefixDir = dirname(binDir);
+  const candidates = [
+    // Windows/npm 及部分便携式 Node 布局：node.exe 与 node_modules 同目录层级。
+    join(binDir, "node_modules", "@earendil-works", "pi-coding-agent"),
+    // Unix/npm（包括 WSL + nvm）：<prefix>/bin/node + <prefix>/lib/node_modules。
+    join(prefixDir, "lib", "node_modules", "@earendil-works", "pi-coding-agent")
+  ];
+  return candidates.find(isHarnessDir);
 }
 function harnessFromArgv() {
   const entry = process.argv[1];
   if (!entry) return void 0;
-  let current = dirname(resolve(entry));
+  const absoluteEntry = resolve(entry);
+  let resolvedEntry = absoluteEntry;
+  try {
+    resolvedEntry = realpathSync(absoluteEntry);
+  } catch {
+  }
+  let current = dirname(resolvedEntry);
   for (let depth = 0; depth < 12; depth++) {
     if (isHarnessDir(current)) return current;
     const parent = dirname(current);

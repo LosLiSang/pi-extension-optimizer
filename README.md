@@ -115,18 +115,23 @@ Pi startup:
 
 **Symptom:** an optimized extension's command (e.g. `/tool-display`) throws `Cannot find package '@earendil-works/pi-coding-agent' imported from …\dist-opt\src\zellij-modal.js` — typically right after you install/uninstall/update a Pi package.
 
-**Root cause (fixed since v0.1.5):** `pi install …` runs `npm` inside `~/.pi/agent/npm`. npm's reify treats the harness junction as *extraneous* — it's a peerDependency, not present in `package-lock.json` — and **deletes it**. Native-loaded subtrees of the extension then fail their bare-import resolution with `ERR_MODULE_NOT_FOUND`.
+**Root cause:** `pi install …` runs `npm` inside `~/.pi/agent/npm`. npm's reify treats the harness junction as *extraneous* — it is not present in `package-lock.json` — and **deletes it**. Native-loaded subtrees of the extension then fail their bare-import resolution with `ERR_MODULE_NOT_FOUND`.
 
 **The fix:** since v0.1.5 the optimizer **rewrites harness bare imports to absolute `file:` URLs** at build time, so rebuilt extensions resolve directly to the real harness and **never depend on the junction** — npm can delete it a thousand times and `/tool-display` keeps working. Junctions remain only as a fallback for builds made by older optimizer versions and subpath imports.
+
+**WSL + nvm note (fixed in v0.1.7):** npm exposes `pi` as a symlink such as `<nvm-prefix>/bin/pi`, while the real package lives under `<nvm-prefix>/lib/node_modules`. Older optimizer builds inspected the unresolved symlink and the wrong `bin/node_modules` location, failed to find the harness, and therefore left bare imports in `dist-opt` even after a rebuild. v0.1.7 resolves the CLI symlink and recognizes the Unix global npm layout.
 
 **If you still see the error:**
 
 ```text
-/ext-opt build --yes   # rebuilds all extensions with the file-URL rewrite (v0.1.5+)
+pi update npm:pi-extension-optimizer
+/ext-opt build --yes   # rebuild all extensions with absolute harness file URLs
 /reload
 ```
 
-Old builds (v0.1.4 and earlier) rely on the junction, which is auto-healed on every Pi start/reload (`/ext-opt repair` fixes it immediately in the current session).
+For an immediate fallback before upgrading, restart Pi or run `/ext-opt repair` to recreate the missing junction. Rebuilding with v0.1.7+ is the durable fix because the generated files no longer need that junction.
+
+> **Switching between WSL and native Windows:** generated `dist-opt` files contain absolute `file:` URLs to the harness installed on the machine that ran the build. Keep the WSL `~/.pi/agent/npm` tree separate from Windows `%USERPROFILE%\.pi\agent\npm`, and run `/ext-opt build --yes` once in each environment. Do not reuse or copy one environment's generated `dist-opt` tree into the other.
 
 ## 🔄 Upgrading
 

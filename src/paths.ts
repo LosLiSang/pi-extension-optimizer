@@ -30,18 +30,34 @@ function isHarnessDir(candidate: string): boolean {
  * 只依赖 execPath，不依赖 agentDir —— 这是打破 agentDir ⇄ realHarnessDir 循环的关键。
  */
 function harnessFromExecPath(): string | undefined {
-	const candidate = join(dirname(process.execPath), "node_modules", "@earendil-works", "pi-coding-agent");
-	return isHarnessDir(candidate) ? candidate : undefined;
+	const binDir = dirname(process.execPath);
+	const prefixDir = dirname(binDir);
+	const candidates = [
+		// Windows/npm 及部分便携式 Node 布局：node.exe 与 node_modules 同目录层级。
+		join(binDir, "node_modules", "@earendil-works", "pi-coding-agent"),
+		// Unix/npm（包括 WSL + nvm）：<prefix>/bin/node + <prefix>/lib/node_modules。
+		join(prefixDir, "lib", "node_modules", "@earendil-works", "pi-coding-agent"),
+	];
+	return candidates.find(isHarnessDir);
 }
 
 /**
  * 由实际启动脚本向上寻找 harness 包根。某些 npm/nvm/Volta 布局中 node.exe 与
  * 全局 node_modules 不在同一前缀，但 process.argv[1] 仍位于 pi-coding-agent 内。
+ * npm 在 Unix/WSL 中通常把 `bin/pi` 做成指向包内 cli.js 的符号链接，必须先
+ * realpath，否则只会沿 `<prefix>/bin` 向上找，永远看不到真实 harness 包根。
  */
 function harnessFromArgv(): string | undefined {
 	const entry = process.argv[1];
 	if (!entry) return undefined;
-	let current = dirname(resolve(entry));
+	const absoluteEntry = resolve(entry);
+	let resolvedEntry = absoluteEntry;
+	try {
+		resolvedEntry = realpathSync(absoluteEntry);
+	} catch {
+		// 启动参数可能不是现存文件；保留绝对路径继续做兼容探测。
+	}
+	let current = dirname(resolvedEntry);
 	for (let depth = 0; depth < 12; depth++) {
 		if (isHarnessDir(current)) return current;
 		const parent = dirname(current);

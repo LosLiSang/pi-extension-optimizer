@@ -1,6 +1,6 @@
 {
 	"name": "pi-extension-optimizer",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"description": "Precompile TypeScript Pi extensions into dist-opt/ .js so jiti skips transpilation at cold start (~13.2s → ~3.0s in the author setup). Auto-scans enabled extensions, backs up package.json before rewriting entries, creates harness junctions, and reports real startup cost.",
 	"type": "module",
 	"license": "MIT",

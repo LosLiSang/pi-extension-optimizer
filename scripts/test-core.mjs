@@ -190,6 +190,56 @@ try {
   assert.equal(argvProbe.status, 0, argvProbe.stderr);
   assert.equal(argvProbe.stdout.trim(), flatHarness);
 
+  // 回归：Windows/npm 与 nvm-windows 常见布局为 <prefix>/node.exe + <prefix>/node_modules。
+  // 该测试只依赖目录层级关系，因此也可在非 Windows CI 上覆盖路径选择逻辑。
+  const windowsPrefix = join(root, "windows-prefix");
+  const windowsHarness = join(windowsPrefix, "node_modules", "@earendil-works", "pi-coding-agent");
+  mkdirSync(windowsHarness, { recursive: true });
+  writeFileSync(join(windowsHarness, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent" }));
+  const windowsExecProbe = spawnSync(process.execPath, ["--input-type=module", "-e", [
+    `Object.defineProperty(process, "execPath", { value: ${JSON.stringify(join(windowsPrefix, "node.exe"))} });`,
+    `process.argv[1] = ${JSON.stringify(join(root, "missing-windows-cli.js"))};`,
+    `process.env.PI_CODING_AGENT_DIR = ${JSON.stringify(join(root, "windows-probe-agent"))};`,
+    `const { realHarnessDir } = await import(${JSON.stringify(`${pathsModuleUrl}?windows-exec-probe`)});`,
+    "console.log(realHarnessDir());",
+  ].join("\n")], { encoding: "utf8" });
+  assert.equal(windowsExecProbe.status, 0, windowsExecProbe.stderr);
+  assert.equal(windowsExecProbe.stdout.trim(), windowsHarness);
+
+  // 回归：Unix/WSL 的 npm bin 入口是符号链接（<prefix>/bin/pi -> 包内 cli.js）。
+  // Windows 无开发者模式时创建文件 symlink 可能被系统拒绝；该场景只在 Unix 系统执行。
+  if (process.platform !== "win32") {
+    const linkedBin = join(root, "linked-prefix", "bin");
+    mkdirSync(linkedBin, { recursive: true });
+    writeFileSync(join(flatHarness, "dist", "cli.js"), "// fixture cli\n");
+    const linkedPi = join(linkedBin, "pi");
+    symlinkSync(join(flatHarness, "dist", "cli.js"), linkedPi);
+    const linkedArgvProbe = spawnSync(process.execPath, ["--input-type=module", "-e", [
+      `Object.defineProperty(process, "execPath", { value: ${JSON.stringify(join(root, "missing-node", "node"))} });`,
+      `process.argv[1] = ${JSON.stringify(linkedPi)};`,
+      `process.env.PI_CODING_AGENT_DIR = ${JSON.stringify(join(root, "linked-probe-agent"))};`,
+      `const { realHarnessDir } = await import(${JSON.stringify(`${pathsModuleUrl}?linked-argv-probe`)});`,
+      "console.log(realHarnessDir());",
+    ].join("\n")], { encoding: "utf8" });
+    assert.equal(linkedArgvProbe.status, 0, linkedArgvProbe.stderr);
+    assert.equal(linkedArgvProbe.stdout.trim(), flatHarness);
+  }
+
+  // 回归：WSL+nvm 的 node 位于 <prefix>/bin，global node_modules 位于 <prefix>/lib/node_modules。
+  const nvmPrefix = join(root, "nvm-prefix");
+  const nvmHarness = join(nvmPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+  mkdirSync(nvmHarness, { recursive: true });
+  writeFileSync(join(nvmHarness, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent" }));
+  const nvmExecProbe = spawnSync(process.execPath, ["--input-type=module", "-e", [
+    `Object.defineProperty(process, "execPath", { value: ${JSON.stringify(join(nvmPrefix, "bin", "node"))} });`,
+    `process.argv[1] = ${JSON.stringify(join(root, "missing-cli.js"))};`,
+    `process.env.PI_CODING_AGENT_DIR = ${JSON.stringify(join(root, "nvm-probe-agent"))};`,
+    `const { realHarnessDir } = await import(${JSON.stringify(`${pathsModuleUrl}?nvm-exec-probe`)});`,
+    "console.log(realHarnessDir());",
+  ].join("\n")], { encoding: "utf8" });
+  assert.equal(nvmExecProbe.status, 0, nvmExecProbe.stderr);
+  assert.equal(nvmExecProbe.stdout.trim(), nvmHarness);
+
   // 没有 harness import 的产物不应因 harness 探测失败产生无关的“改写警告”。
   const unrelatedOut = join(root, "unrelated-output");
   mkdirSync(unrelatedOut, { recursive: true });
