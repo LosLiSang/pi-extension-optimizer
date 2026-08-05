@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { scanOptimizableExtensions, scanPiExtensions } from "../dist/scanner.js";
-import { buildOne, ensureHarnessJunctions, extensionNeedsBuild, getPackageStatus, rollbackOne } from "../dist/transpiler.js";
+import { buildOne, checkHarnessJunctions, ensureHarnessJunctions, extensionNeedsBuild, getPackageStatus, rewriteHarnessImports, rollbackOne } from "../dist/transpiler.js";
 
 const root = mkdtempSync(join(tmpdir(), "pi-ext-opt-test-"));
 try {
@@ -29,7 +31,7 @@ try {
   assert.equal(result.files, 2);
   assert.equal(existsSync(join(pkgDir, "dist-opt", "index.js")), true);
   assert.match(readFileSync(join(pkgDir, "dist-opt", "index.js"), "utf8"), /\.\/helper\.js/);
-  // harness 裸导入保留为 bare（junction 方案：静态链 jiti alias、动态链 Node 原生解析到 junction）
+  // 非 harness 的裸导入保持不变。
   assert.match(readFileSync(join(pkgDir, "dist-opt", "index.js"), "utf8"), /from "typebox"/);
   assert.equal(JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")).pi.extensions[0], "./dist-opt/index.js");
 
@@ -131,6 +133,68 @@ try {
   assert.ok(!created.created.includes("@earendil-works/pi-agent-core"), "目标不存在时不应创建悬空 junction");
   assert.equal(created.warnings.length, 0, "目标不存在属正常布局，不应产生警告");
   assert.equal(existsSync(join(linkRoot, "pi-agent-core")), false);
+  const optionalState = checkHarnessJunctions(join(root, "links", "node_modules"), fakeHarness)
+    .find((state) => state.name === "@earendil-works/pi-agent-core");
+  assert.equal(optionalState.ok, true, "无需 junction 的包不应计为异常");
+  assert.equal(optionalState.needed, false);
+
+  // 回归：npm 扁平安装会把 pi-ai / pi-agent-core 提升为 pi-coding-agent 的同级包。
+  // junction 与 harness import 改写都必须解析这种布局，而非硬编码 nested node_modules。
+  const flatScope = join(root, "flat-global", "node_modules", "@earendil-works");
+  const flatHarness = join(flatScope, "pi-coding-agent");
+  const flatAi = join(flatScope, "pi-ai");
+  const flatCore = join(flatScope, "pi-agent-core");
+  mkdirSync(join(flatHarness, "dist"), { recursive: true });
+  mkdirSync(join(flatAi, "dist"), { recursive: true });
+  mkdirSync(join(flatCore, "dist"), { recursive: true });
+  writeFileSync(join(flatHarness, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", exports: { ".": { import: "./dist/index.js" } } }));
+  writeFileSync(join(flatHarness, "dist", "index.js"), "export default 1;\n");
+  writeFileSync(join(flatAi, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", exports: { "./compat": { import: "./dist/compat.js" } } }));
+  writeFileSync(join(flatAi, "dist", "compat.js"), "export default 2;\n");
+  writeFileSync(join(flatCore, "package.json"), JSON.stringify({ name: "@earendil-works/pi-agent-core", exports: { ".": { import: "./dist/index.js" } } }));
+  writeFileSync(join(flatCore, "dist", "index.js"), "export default 3;\n");
+
+  const flatLinksNm = join(root, "flat-links", "node_modules");
+  const flatCreated = ensureHarnessJunctions(flatLinksNm, flatHarness);
+  assert.deepEqual(new Set(flatCreated.created), new Set([
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-agent-core",
+  ]));
+  assert.equal(checkHarnessJunctions(flatLinksNm, flatHarness).every((state) => state.ok), true);
+
+  const flatOut = join(root, "flat-output");
+  mkdirSync(flatOut, { recursive: true });
+  writeFileSync(join(flatOut, "index.js"), [
+    'import agent from "@earendil-works/pi-coding-agent";',
+    'import ai from "@earendil-works/pi-ai";',
+    'import core from "@earendil-works/pi-agent-core";',
+    "export default [agent, ai, core];",
+  ].join("\n"));
+  assert.deepEqual(rewriteHarnessImports(flatOut, flatHarness), []);
+  const flatOutputCode = readFileSync(join(flatOut, "index.js"), "utf8");
+  assert.doesNotMatch(flatOutputCode, /from "@earendil-works\//);
+  assert.match(flatOutputCode, /pi-coding-agent\/dist\/index\.js/);
+  assert.match(flatOutputCode, /pi-ai\/dist\/compat\.js/);
+  assert.match(flatOutputCode, /pi-agent-core\/dist\/index\.js/);
+
+  // 回归：node.exe 与全局 npm root 不同前缀时，应从实际 CLI 路径向上定位 harness。
+  const pathsModuleUrl = pathToFileURL(resolve("dist/paths.js")).href;
+  const argvProbe = spawnSync(process.execPath, ["--input-type=module", "-e", [
+    `Object.defineProperty(process, "execPath", { value: ${JSON.stringify(join(root, "missing-node", "node.exe"))} });`,
+    `process.argv[1] = ${JSON.stringify(join(flatHarness, "dist", "cli.js"))};`,
+    `process.env.PI_CODING_AGENT_DIR = ${JSON.stringify(join(root, "probe-agent"))};`,
+    `const { realHarnessDir } = await import(${JSON.stringify(`${pathsModuleUrl}?argv-probe`)});`,
+    "console.log(realHarnessDir());",
+  ].join("\n")], { encoding: "utf8" });
+  assert.equal(argvProbe.status, 0, argvProbe.stderr);
+  assert.equal(argvProbe.stdout.trim(), flatHarness);
+
+  // 没有 harness import 的产物不应因 harness 探测失败产生无关的“改写警告”。
+  const unrelatedOut = join(root, "unrelated-output");
+  mkdirSync(unrelatedOut, { recursive: true });
+  writeFileSync(join(unrelatedOut, "index.js"), 'import value from "some-package";\n');
+  assert.deepEqual(rewriteHarnessImports(unrelatedOut, join(root, "missing-harness")), []);
   // 模拟 pi 升级后旧 junction 指向已消失的路径：链接 broken（lstat 在、existsSync 失败），
   // 而当前 harness 目标存在 → 应移除坏链接并重建到新目标。
   const oldHarness = join(root, "old-harness");

@@ -14,13 +14,22 @@ import { pathToFileURL } from "node:url";
 import { realHarnessDir } from "./paths.js";
 const SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
+function harnessPackageDir(harness, packageName) {
+  if (packageName === "@earendil-works/pi-coding-agent") return harness;
+  const leaf = packageName.slice(packageName.lastIndexOf("/") + 1);
+  const nested = join(harness, "node_modules", "@earendil-works", leaf);
+  const flat = join(dirname(harness), leaf);
+  if (existsSync(join(nested, "package.json"))) return nested;
+  if (existsSync(join(flat, "package.json"))) return flat;
+  return nested;
+}
 function harnessJunctionTargets(harness) {
-  const nestedRoot = join(harness, "node_modules", "@earendil-works");
-  return [
-    ["@earendil-works/pi-coding-agent", harness],
-    ["@earendil-works/pi-ai", join(nestedRoot, "pi-ai")],
-    ["@earendil-works/pi-agent-core", join(nestedRoot, "pi-agent-core")]
+  const names = [
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-agent-core"
   ];
+  return names.map((name) => [name, harnessPackageDir(harness, name)]);
 }
 function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
   const created = [];
@@ -64,9 +73,9 @@ function checkHarnessJunctions(nm, harness = realHarnessDir()) {
     } catch {
     }
     if (hasLink) {
-      states.push(existsSync(link) ? { name, ok: true } : { name, ok: false, reason: "\u635F\u574F\u7684\u94FE\u63A5\uFF08\u76EE\u6807\u4E0D\u53EF\u89E3\u6790\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" });
+      states.push(existsSync(link) ? { name, ok: true, needed: true } : { name, ok: false, needed: true, reason: "\u635F\u574F\u7684\u94FE\u63A5\uFF08\u76EE\u6807\u4E0D\u53EF\u89E3\u6790\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" });
     } else {
-      states.push(existsSync(target) ? { name, ok: false, reason: "\u7F3A\u5931\uFF08npm \u91CD\u5BA1\u8BA1\u4F1A\u6E05\u9664\u9501\u6587\u4EF6\u5916\u7684\u94FE\u63A5\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" } : { name, ok: false, reason: "\u76EE\u6807\u4E0D\u5B58\u5728\uFF08\u6241\u5E73\u5B89\u88C5\u5C5E\u6B63\u5E38\u5E03\u5C40\uFF0C\u65E0\u9700 junction\uFF09" });
+      states.push(existsSync(target) ? { name, ok: false, needed: true, reason: "\u7F3A\u5931\uFF08npm \u91CD\u5BA1\u8BA1\u4F1A\u6E05\u9664\u9501\u6587\u4EF6\u5916\u7684\u94FE\u63A5\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" } : { name, ok: true, needed: false, reason: "\u5F53\u524D harness \u672A\u5B89\u88C5\u6B64\u5305\uFF0C\u65E0\u9700 junction" });
     }
   }
   return states;
@@ -235,6 +244,7 @@ async function transpileDotTsDeps(ext, nm, visited, errors) {
 }
 function rewriteHarnessImports(outRoot, harness) {
   const warnings = [];
+  const barePackages = collectBarePackageNames(outRoot);
   const packagesRoot = dirname(harness);
   const resolveNestedEntry = (pkgDir, subpath) => {
     try {
@@ -262,13 +272,15 @@ function rewriteHarnessImports(outRoot, harness) {
     if (existsSync(ws)) return ws;
     return resolveNestedEntry(pkgDir, subpath);
   };
-  const nested = join(harness, "node_modules", "@earendil-works");
+  const piAiDir = harnessPackageDir(harness, "@earendil-works/pi-ai");
+  const piAgentCoreDir = harnessPackageDir(harness, "@earendil-works/pi-agent-core");
   const entries = [
     ["@earendil-works/pi-coding-agent", join(harness, "dist", "index.js")],
-    ["@earendil-works/pi-ai", workspaceOrImport(join(nested, "pi-ai"), "ai/dist/compat.js", "compat")],
-    ["@earendil-works/pi-agent-core", workspaceOrImport(join(nested, "pi-agent-core"), "agent/dist/index.js")]
+    ["@earendil-works/pi-ai", workspaceOrImport(piAiDir, "ai/dist/compat.js", "compat")],
+    ["@earendil-works/pi-agent-core", workspaceOrImport(piAgentCoreDir, "agent/dist/index.js")]
   ];
   for (const [name, entry] of entries) {
+    if (!barePackages.has(name)) continue;
     if (!entry) {
       warnings.push(`${name}: \u65E0\u6CD5\u89E3\u6790 harness \u5165\u53E3\uFF0C\u4EA7\u7269\u4FDD\u7559\u88F8\u5BFC\u5165\uFF08\u4F9D\u8D56 junction \u515C\u5E95\uFF09`);
       continue;

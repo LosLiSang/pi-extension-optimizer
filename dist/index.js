@@ -196,7 +196,7 @@ async function handleRepair(ctx) {
     ctx,
     `junction \u68C0\u67E5\uFF1A${healthy.length}/${states.length} \u6B63\u5E38${result.created.length > 0 ? `\uFF08\u672C\u6B21\u4FEE\u590D ${result.created.join(", ")}\uFF09` : ""}`,
     [
-      ...states.map((item) => `${item.ok ? "\u2705" : "\u274C"} ${item.name}${item.reason ? ` \u2014 ${item.reason}` : ""}`),
+      ...states.map((item) => `${!item.needed ? "\u2796" : item.ok ? "\u2705" : "\u274C"} ${item.name}${item.reason ? ` \u2014 ${item.reason}` : ""}`),
       ...result.warnings.length > 0 ? [`\u26A0\uFE0F ${result.warnings.join("\n\u26A0\uFE0F ")}`] : []
     ]
   );

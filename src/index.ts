@@ -215,7 +215,7 @@ async function handleRepair(ctx: any) {
 		ctx,
 		`junction 检查：${healthy.length}/${states.length} 正常${result.created.length > 0 ? `（本次修复 ${result.created.join(", ")}）` : ""}`,
 		[
-			...states.map((item) => `${item.ok ? "✅" : "❌"} ${item.name}${item.reason ? ` — ${item.reason}` : ""}`),
+			...states.map((item) => `${!item.needed ? "➖" : item.ok ? "✅" : "❌"} ${item.name}${item.reason ? ` — ${item.reason}` : ""}`),
 			...(result.warnings.length > 0 ? [`⚠️ ${result.warnings.join("\n⚠️ ")}`] : []),
 		],
 	);

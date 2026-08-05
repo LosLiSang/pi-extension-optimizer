@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 /** 惰性求值 + 缓存：路径在进程生命周期内不变，避免重复解析。 */
 function memo<T>(fn: () => T): () => T {
@@ -15,13 +15,45 @@ function memo<T>(fn: () => T): () => T {
 	};
 }
 
+/** 验证目录确实是当前命名空间的 pi-coding-agent 包。 */
+function isHarnessDir(candidate: string): boolean {
+	try {
+		const pkg = JSON.parse(readFileSync(join(candidate, "package.json"), "utf8"));
+		return pkg?.name === "@earendil-works/pi-coding-agent";
+	} catch {
+		return false;
+	}
+}
+
 /**
- * 由 process.execPath 推导的 harness 位置（如 nvm 全局安装、npm 全局安装）。
+ * 由 process.execPath 推导 harness（适用于 Node 与全局 npm root 同目录的安装）。
  * 只依赖 execPath，不依赖 agentDir —— 这是打破 agentDir ⇄ realHarnessDir 循环的关键。
  */
 function harnessFromExecPath(): string | undefined {
 	const candidate = join(dirname(process.execPath), "node_modules", "@earendil-works", "pi-coding-agent");
-	return existsSync(join(candidate, "package.json")) ? candidate : undefined;
+	return isHarnessDir(candidate) ? candidate : undefined;
+}
+
+/**
+ * 由实际启动脚本向上寻找 harness 包根。某些 npm/nvm/Volta 布局中 node.exe 与
+ * 全局 node_modules 不在同一前缀，但 process.argv[1] 仍位于 pi-coding-agent 内。
+ */
+function harnessFromArgv(): string | undefined {
+	const entry = process.argv[1];
+	if (!entry) return undefined;
+	let current = dirname(resolve(entry));
+	for (let depth = 0; depth < 12; depth++) {
+		if (isHarnessDir(current)) return current;
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return undefined;
+}
+
+/** 不依赖 agentDir 的 harness 探测，供配置目录与真实 harness 路径共同使用。 */
+function harnessFromRuntime(): string | undefined {
+	return harnessFromArgv() ?? harnessFromExecPath();
 }
 
 /**
@@ -32,7 +64,7 @@ function harnessFromExecPath(): string | undefined {
  */
 const configDirName = memo((): string => {
 	try {
-		const harnessDir = harnessFromExecPath();
+		const harnessDir = harnessFromRuntime();
 		if (harnessDir) {
 			const pkg = JSON.parse(readFileSync(join(harnessDir, "package.json"), "utf8"));
 			const configured = pkg?.piConfig?.configDir;
@@ -59,24 +91,28 @@ const agentNodeModules = memo((): string => join(agentDir(), "npm", "node_module
 
 /**
  * 真实 harness 目录（即 pi 本体安装位置）。
- * 1) pi node_modules 根的 junction（ensureHarnessJunctions 创建）→ realpath 穿透
- * 2) process.execPath 推导（pi 用 nvm 的 node 运行，harness 在 node 同级 node_modules）
- * 3) 最后手段：join(agentNodeModules(), "@earendil-works", "pi-coding-agent")（junction 或已安装副本）
+ * 1) 从实际 CLI 路径或 process.execPath 独立探测（不依赖可能被 npm 删除的 junction）
+ * 2) pi node_modules 根现有 junction → realpath 穿透
+ * 3) 最后手段：返回预期 junction 路径，供诊断明确报告缺失
  */
 const realHarnessDir = memo((): string => {
-	// 1) junction 已指向真实 harness → realpath 穿透
+	const fromRuntime = harnessFromRuntime();
+	if (fromRuntime) {
+		try {
+			return realpathSync(fromRuntime);
+		} catch {
+			return fromRuntime;
+		}
+	}
+
 	const junction = join(agentNodeModules(), "@earendil-works", "pi-coding-agent");
-	if (existsSync(join(junction, "package.json"))) {
+	if (isHarnessDir(junction)) {
 		try {
 			return realpathSync(junction);
 		} catch {
-			// junction 损坏则继续探测
+			// junction 损坏则落到诊断路径
 		}
 	}
-	// 2) execPath 推导
-	const fromExec = harnessFromExecPath();
-	if (fromExec) return fromExec;
-	// 3) 最后手段
 	return junction;
 });
 

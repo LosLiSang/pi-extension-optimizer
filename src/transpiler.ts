@@ -27,21 +27,34 @@ export interface JunctionResult {
 export interface JunctionState {
 	name: string;
 	ok: boolean;
-	/** 不健康时的原因描述 */
+	/** false 表示当前 harness 布局未安装该包，因此无需 junction。 */
+	needed: boolean;
+	/** 状态补充说明 */
 	reason?: string;
 }
 
 /**
- * 需要建 junction 的 harness 包及其目标（真实 harness 目录或其 node_modules 下的嵌套包）。
- * pi-ai / pi-agent-core 是 pi-coding-agent 包内 node_modules 下的嵌套包。
+ * 解析 harness 相关包目录。npm 可能把依赖放在 pi-coding-agent/node_modules 内，
+ * 也可能扁平提升到与 pi-coding-agent 同级的 @earendil-works scope 目录。
  */
+function harnessPackageDir(harness: string, packageName: string): string {
+	if (packageName === "@earendil-works/pi-coding-agent") return harness;
+	const leaf = packageName.slice(packageName.lastIndexOf("/") + 1);
+	const nested = join(harness, "node_modules", "@earendil-works", leaf);
+	const flat = join(dirname(harness), leaf);
+	if (existsSync(join(nested, "package.json"))) return nested;
+	if (existsSync(join(flat, "package.json"))) return flat;
+	return nested;
+}
+
+/** 需要建 junction 的 harness 包及其实际目标（兼容嵌套与扁平 npm 布局）。 */
 export function harnessJunctionTargets(harness: string): Array<[string, string]> {
-	const nestedRoot = join(harness, "node_modules", "@earendil-works");
-	return [
-		["@earendil-works/pi-coding-agent", harness],
-		["@earendil-works/pi-ai", join(nestedRoot, "pi-ai")],
-		["@earendil-works/pi-agent-core", join(nestedRoot, "pi-agent-core")],
+	const names = [
+		"@earendil-works/pi-coding-agent",
+		"@earendil-works/pi-ai",
+		"@earendil-works/pi-agent-core",
 	];
+	return names.map((name) => [name, harnessPackageDir(harness, name)]);
 }
 
 /**
@@ -106,12 +119,12 @@ export function checkHarnessJunctions(nm: string, harness: string = realHarnessD
 		}
 		if (hasLink) {
 			states.push(existsSync(link)
-				? { name, ok: true }
-				: { name, ok: false, reason: "损坏的链接（目标不可解析），将在下次扩展加载时自动修复" });
+				? { name, ok: true, needed: true }
+				: { name, ok: false, needed: true, reason: "损坏的链接（目标不可解析），将在下次扩展加载时自动修复" });
 		} else {
 			states.push(existsSync(target)
-				? { name, ok: false, reason: "缺失（npm 重审计会清除锁文件外的链接），将在下次扩展加载时自动修复" }
-				: { name, ok: false, reason: "目标不存在（扁平安装属正常布局，无需 junction）" });
+				? { name, ok: false, needed: true, reason: "缺失（npm 重审计会清除锁文件外的链接），将在下次扩展加载时自动修复" }
+				: { name, ok: true, needed: false, reason: "当前 harness 未安装此包，无需 junction" });
 		}
 	}
 	return states;
@@ -326,6 +339,7 @@ async function transpileDotTsDeps(
  */
 export function rewriteHarnessImports(outRoot: string, harness: string): string[] {
 	const warnings: string[] = [];
+	const barePackages = collectBarePackageNames(outRoot);
 	const packagesRoot = dirname(harness);
 	/** 按 import 条件解析嵌套包入口（与 pi loader import.meta.resolve 语义一致） */
 	const resolveNestedEntry = (pkgDir: string, subpath?: string): string | undefined => {
@@ -358,14 +372,16 @@ export function rewriteHarnessImports(outRoot: string, harness: string): string[
 		if (existsSync(ws)) return ws;
 		return resolveNestedEntry(pkgDir, subpath);
 	};
-	const nested = join(harness, "node_modules", "@earendil-works");
+	const piAiDir = harnessPackageDir(harness, "@earendil-works/pi-ai");
+	const piAgentCoreDir = harnessPackageDir(harness, "@earendil-works/pi-agent-core");
 	// name → 入口（与 pi getAliases 的 pi-coding-agent/pi-ai/pi-agent-core 三项一致）
 	const entries: Array<[string, string | undefined]> = [
 		["@earendil-works/pi-coding-agent", join(harness, "dist", "index.js")],
-		["@earendil-works/pi-ai", workspaceOrImport(join(nested, "pi-ai"), "ai/dist/compat.js", "compat")],
-		["@earendil-works/pi-agent-core", workspaceOrImport(join(nested, "pi-agent-core"), "agent/dist/index.js")],
+		["@earendil-works/pi-ai", workspaceOrImport(piAiDir, "ai/dist/compat.js", "compat")],
+		["@earendil-works/pi-agent-core", workspaceOrImport(piAgentCoreDir, "agent/dist/index.js")],
 	];
 	for (const [name, entry] of entries) {
+		if (!barePackages.has(name)) continue;
 		if (!entry) {
 			warnings.push(`${name}: 无法解析 harness 入口，产物保留裸导入（依赖 junction 兜底）`);
 			continue;
