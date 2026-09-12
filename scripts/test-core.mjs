@@ -12,6 +12,8 @@ try {
   const nm = join(root, "node_modules");
   const pkgDir = join(nm, "fixture-extension");
   mkdirSync(join(pkgDir, "src"), { recursive: true });
+  mkdirSync(join(pkgDir, "src", "prompts"), { recursive: true });
+  writeFileSync(join(pkgDir, "src", "prompts", "system.txt"), "prompt content\n");
   writeFileSync(join(pkgDir, "package.json"), JSON.stringify({
     name: "fixture-extension",
     version: "1.0.0",
@@ -30,6 +32,8 @@ try {
   assert.equal(result.ok, true, result.errors.join("\n"));
   assert.equal(result.files, 2);
   assert.equal(existsSync(join(pkgDir, "dist-opt", "index.js")), true);
+  assert.equal(existsSync(join(pkgDir, "dist-opt", "prompts", "system.txt")), true, "静态资源文件应被同步复制到 dist-opt");
+  assert.equal(readFileSync(join(pkgDir, "dist-opt", "prompts", "system.txt"), "utf8"), "prompt content\n");
   assert.match(readFileSync(join(pkgDir, "dist-opt", "index.js"), "utf8"), /\.\/helper\.js/);
   // 非 harness 的裸导入保持不变。
   assert.match(readFileSync(join(pkgDir, "dist-opt", "index.js"), "utf8"), /from "typebox"/);

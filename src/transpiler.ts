@@ -1,4 +1,5 @@
 import {
+	copyFileSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
@@ -165,6 +166,40 @@ function walkTypeScript(dir: string, out: string[] = []): string[] {
 	return out;
 }
 
+const SKIP_ASSET_NAMES = new Set([
+	"package.json.pi-orig",
+	"package-lock.json",
+	"yarn.lock",
+	"pnpm-lock.yaml",
+]);
+
+function walkAssets(dir: string, out: string[] = []): string[] {
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return out;
+	}
+	for (const name of names) {
+		const full = join(dir, name);
+		let stat;
+		try {
+			stat = statSync(full);
+		} catch {
+			continue;
+		}
+		if (stat.isDirectory()) {
+			if (!SKIP_DIRS.has(name)) walkAssets(full, out);
+		} else {
+			if (SKIP_ASSET_NAMES.has(name) || name.endsWith(".pi-orig")) continue;
+			// Skip TypeScript source, declaration and build files (handled by esbuild)
+			if (name.endsWith(".ts") || name.endsWith(".tsx") || name.endsWith(".map") || name.endsWith(".tsbuildinfo")) continue;
+			out.push(full);
+		}
+	}
+	return out;
+}
+
 /** 把 srcRoot 下的 .ts 树转译为 outRoot/*.js（相对 .ts 后缀改写）。harness 裸导入保留（由 junction 兜底）。 */
 async function transpileTree(
 	srcRoot: string,
@@ -192,6 +227,20 @@ async function transpileTree(
 			errors.push(`${relative(srcRoot, file)}: ${message}`);
 		}
 	}
+
+	// Copy static assets and non-TS resources (prompts, templates, schemas, etc.)
+	const assets = walkAssets(srcRoot);
+	for (const asset of assets) {
+		try {
+			const output = join(outRoot, relative(srcRoot, asset));
+			mkdirSync(dirname(output), { recursive: true });
+			copyFileSync(asset, output);
+		} catch (error) {
+			const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
+			errors.push(`asset ${relative(srcRoot, asset)}: ${message}`);
+		}
+	}
+
 	return { files: written, total: files.length };
 }
 

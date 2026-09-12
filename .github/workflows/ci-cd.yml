@@ -1,0 +1,73 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: 'Force publish regardless of version check'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:core
+
+  publish:
+    needs: [quality]
+    if: >-
+      github.repository == 'LosLiSang/pi-extension-optimizer' &&
+      !cancelled() &&
+      needs.quality.result == 'success' &&
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Publish to npm if new version
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          FORCE_PUBLISH: ${{ inputs.force_publish }}
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          echo "Package: $PACKAGE_NAME @ $CURRENT_VERSION"
+
+          if [ "$FORCE_PUBLISH" = "true" ]; then
+            echo "Force publishing..."
+            npm publish --access public
+            exit 0
+          fi
+
+          if npm view "$PACKAGE_NAME@$CURRENT_VERSION" version >/dev/null 2>&1; then
+            echo "Version $CURRENT_VERSION is already published to npm. Skipping."
+          else
+            echo "Publishing $PACKAGE_NAME@$CURRENT_VERSION to npm..."
+            npm publish --access public
+            echo "Successfully published $PACKAGE_NAME@$CURRENT_VERSION!"
+          fi

@@ -1,4 +1,5 @@
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -111,6 +112,37 @@ function walkTypeScript(dir, out = []) {
   }
   return out;
 }
+const SKIP_ASSET_NAMES = /* @__PURE__ */ new Set([
+  "package.json.pi-orig",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml"
+]);
+function walkAssets(dir, out = []) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const full = join(dir, name);
+    let stat;
+    try {
+      stat = statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      if (!SKIP_DIRS.has(name)) walkAssets(full, out);
+    } else {
+      if (SKIP_ASSET_NAMES.has(name) || name.endsWith(".pi-orig")) continue;
+      if (name.endsWith(".ts") || name.endsWith(".tsx") || name.endsWith(".map") || name.endsWith(".tsbuildinfo")) continue;
+      out.push(full);
+    }
+  }
+  return out;
+}
 async function transpileTree(srcRoot, outRoot, errors) {
   const { transform } = await import("esbuild");
   const files = walkTypeScript(srcRoot);
@@ -130,6 +162,17 @@ async function transpileTree(srcRoot, outRoot, errors) {
     } catch (error) {
       const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
       errors.push(`${relative(srcRoot, file)}: ${message}`);
+    }
+  }
+  const assets = walkAssets(srcRoot);
+  for (const asset of assets) {
+    try {
+      const output = join(outRoot, relative(srcRoot, asset));
+      mkdirSync(dirname(output), { recursive: true });
+      copyFileSync(asset, output);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
+      errors.push(`asset ${relative(srcRoot, asset)}: ${message}`);
     }
   }
   return { files: written, total: files.length };
