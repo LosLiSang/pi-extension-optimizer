@@ -6,129 +6,136 @@ import {
 	readdirSync,
 	readFileSync,
 	statSync,
-	symlinkSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
-import { realHarnessDir } from "./paths.js";
 import type { OptimizableExtension, PiPackage } from "./scanner.js";
 
 const SKIP_DIRS = new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
 
-export interface JunctionResult {
-	/** 本次新创建/修复的链接名 */
-	created: string[];
-	/** 创建/修复失败的原因（非致命：静态链仍由 jiti alias 处理，但原生加载的子树里裸导入会失败） */
+/** 旧版本可能建过链接的 scope（@mariozechner 为 pi 旧命名空间）。 */
+const HARNESS_SCOPES = ["@earendil-works", "@mariozechner"];
+
+export interface LinkCleanupResult {
+	/** 本次移除的链接名（如 @earendil-works/pi-coding-agent） */
+	removed: string[];
+	/** 移除失败的原因 */
 	warnings: string[];
 }
 
-export interface JunctionState {
-	name: string;
-	ok: boolean;
-	/** false 表示当前 harness 布局未安装该包，因此无需 junction。 */
-	needed: boolean;
-	/** 状态补充说明 */
-	reason?: string;
-}
-
 /**
- * 解析 harness 相关包目录。npm 可能把依赖放在 pi-coding-agent/node_modules 内，
- * 也可能扁平提升到与 pi-coding-agent 同级的 @earendil-works scope 目录。
+ * 列出 nm/@earendil-works（及旧命名空间）下的符号链接 / junction（含悬空链接）。
+ * 这些链接由 v0.1.7 及更早版本创建，指向 pi 本体安装目录。
+ * 真实目录（npm 正常安装的包，如 pi-tui）不算在内。
  */
-function harnessPackageDir(harness: string, packageName: string): string {
-	if (packageName === "@earendil-works/pi-coding-agent") return harness;
-	const leaf = packageName.slice(packageName.lastIndexOf("/") + 1);
-	const nested = join(harness, "node_modules", "@earendil-works", leaf);
-	const flat = join(dirname(harness), leaf);
-	if (existsSync(join(nested, "package.json"))) return nested;
-	if (existsSync(join(flat, "package.json"))) return flat;
-	return nested;
-}
-
-/** 需要建 junction 的 harness 包及其实际目标（兼容嵌套与扁平 npm 布局）。 */
-export function harnessJunctionTargets(harness: string): Array<[string, string]> {
-	const names = [
-		"@earendil-works/pi-coding-agent",
-		"@earendil-works/pi-ai",
-		"@earendil-works/pi-agent-core",
-	];
-	return names.map((name) => [name, harnessPackageDir(harness, name)]);
-}
-
-/**
- * 在 pi 的 node_modules 根创建 harness 包 junction（@earendil-works/pi-coding-agent 等 → 真实 harness）。
- * 这样产物保留 bare import：静态链由 jiti alias 处理（性能 = 原 .ts 加载），
- * 运行时动态 import()/require() 由 Node 原生解析到 junction（真实 harness）。
- *
- * 修复语义：已存在且可解析的链接保留；损坏的链接（existsSync 跟随目标失败）先删后建；
- * 目标不存在的（如扁平安装下无嵌套 pi-ai）不创建悬空 junction。
- * harness 参数仅测试注入用，默认取 realHarnessDir()。
- */
-export function ensureHarnessJunctions(nm: string, harness: string = realHarnessDir()): JunctionResult {
-	const created: string[] = [];
-	const warnings: string[] = [];
-	for (const [name, target] of harnessJunctionTargets(harness)) {
-		const link = join(nm, name);
-		let hasLink = false;
+export function findHarnessLinks(nm: string): string[] {
+	const links: string[] = [];
+	for (const scope of HARNESS_SCOPES) {
+		let names: string[];
 		try {
-			lstatSync(link);
-			hasLink = true;
+			names = readdirSync(join(nm, scope));
 		} catch {
-			// 链接不存在
+			continue;
 		}
-		if (hasLink) {
-			if (existsSync(link)) continue; // 健康（真实目录或可解析 junction）
+		for (const name of names) {
 			try {
-				// Windows 上 broken junction 必须用 unlinkSync 删链接本身；
-				// rmSync 会静默保留链接（且递归删除有跟随 junction 误删目标的风险）。
-				unlinkSync(link);
-			} catch (error) {
-				warnings.push(`${name}: 损坏的链接无法移除（${(error as Error).message}），动态 import() 可能解析失败`);
-				continue;
+				if (lstatSync(join(nm, scope, name)).isSymbolicLink()) links.push(`${scope}/${name}`);
+			} catch {
+				// 读不到就跳过
 			}
 		}
-		if (!existsSync(target)) continue; // 目标不存在：不创建悬空 junction（扁平安装属正常布局，不算警告）
-		try {
-			mkdirSync(dirname(link), { recursive: true });
-			symlinkSync(target, link, "junction");
-			created.push(name);
-		} catch (error) {
-			// 典型原因：Windows 无管理员权限且未开开发者模式
-			warnings.push(`${name}: 创建 junction 失败（${(error as Error).message}），运行时动态 import() 会报 Cannot find package；请以管理员运行或开启开发者模式后重新 build`);
-		}
 	}
-	return { created, warnings };
+	return links;
 }
 
 /**
- * 检查三个 harness junction 的当前健康状态（不修改文件系统）。
- * 用于 /ext-opt status 展示与 repair 前的诊断。
+ * 移除 harness 链接。为什么要删：打包版 pi 通过 virtualModules 把 @earendil-works/* 解析到运行中的实例；
+ * 但 Node 原生加载的子树会按 node_modules 解析，有链接时就会顺着链接再加载一份未打包的 pi
+ * （实测启动 +~3s，且 instanceof / 单例与主进程不一致）。
+ * 只删链接本身（unlinkSync），绝不递归删除，避免跟随 junction 误删 pi 本体。
  */
-export function checkHarnessJunctions(nm: string, harness: string = realHarnessDir()): JunctionState[] {
-	const states: JunctionState[] = [];
-	for (const [name, target] of harnessJunctionTargets(harness)) {
-		const link = join(nm, name);
-		let hasLink = false;
+export function removeHarnessLinks(nm: string): LinkCleanupResult {
+	const removed: string[] = [];
+	const warnings: string[] = [];
+	for (const name of findHarnessLinks(nm)) {
 		try {
-			lstatSync(link);
-			hasLink = true;
-		} catch {
-			// 链接不存在
-		}
-		if (hasLink) {
-			states.push(existsSync(link)
-				? { name, ok: true, needed: true }
-				: { name, ok: false, needed: true, reason: "损坏的链接（目标不可解析），将在下次扩展加载时自动修复" });
-		} else {
-			states.push(existsSync(target)
-				? { name, ok: false, needed: true, reason: "缺失（npm 重审计会清除锁文件外的链接），将在下次扩展加载时自动修复" }
-				: { name, ok: true, needed: false, reason: "当前 harness 未安装此包，无需 junction" });
+			unlinkSync(join(nm, name));
+			removed.push(name);
+		} catch (error) {
+			warnings.push(`${name}: 无法移除链接（${(error as Error).message}）`);
 		}
 	}
-	return states;
+	return { removed, warnings };
+}
+
+/**
+ * 确保 outRoot/package.json 声明 "type": "commonjs"（已有 package.json 时合并，只改 type）。
+ *
+ * 为什么：扩展包通常是 "type": "module"，jiti 会把其中的 .js 交给 Node 原生 import()，
+ * 之后整棵子树（含动态 import()）都由 Node 原生解析，@earendil-works/* 只能去 node_modules 里找：
+ * 没有链接 → Cannot find package；有链接 → 加载第二份未打包的 pi。
+ * 标记为 commonjs 后 Node 无法原生加载这些 ESM 语法的 .js，jiti 会回退为自己转译，
+ * harness 导入因此经 virtualModules 解析到运行中的 pi。
+ *
+ * 返回是否写入了文件；outRoot 不存在时返回 false。
+ */
+export function ensureCommonjsMarker(outRoot: string): boolean {
+	if (!existsSync(outRoot)) return false;
+	const pjPath = join(outRoot, "package.json");
+	let pj: Record<string, unknown> = {};
+	if (existsSync(pjPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(pjPath, "utf8"));
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) pj = parsed;
+		} catch {
+			// 损坏的 package.json：用最小标记覆盖
+		}
+	}
+	if (pj.type === "commonjs") return false;
+	pj.type = "commonjs";
+	writeFileSync(pjPath, `${JSON.stringify(pj, null, 2)}
+`);
+	return true;
+}
+
+function hasCommonjsMarker(outRoot: string): boolean {
+	try {
+		return JSON.parse(readFileSync(join(outRoot, "package.json"), "utf8"))?.type === "commonjs";
+	} catch {
+		return false;
+	}
+}
+
+/** 给 nm 下所有包（含 scope 包）的 dist-opt 补齐 commonjs 标记，返回补齐的包名。用于启动迁移旧产物。 */
+export function markAllDistOpt(nm: string): string[] {
+	const marked: string[] = [];
+	const visit = (pkgDir: string, name: string) => {
+		if (ensureCommonjsMarker(join(pkgDir, "dist-opt"))) marked.push(name);
+	};
+	let names: string[];
+	try {
+		names = readdirSync(nm);
+	} catch {
+		return marked;
+	}
+	for (const name of names) {
+		if (name.startsWith(".")) continue;
+		if (name.startsWith("@")) {
+			let scoped: string[];
+			try {
+				scoped = readdirSync(join(nm, name));
+			} catch {
+				continue;
+			}
+			for (const child of scoped) visit(join(nm, name, child), `${name}/${child}`);
+		} else {
+			visit(join(nm, name), name);
+		}
+	}
+	return marked;
 }
 
 /** 由原始入口推导优化后入口：./src/index.ts -> ./dist-opt/index.js；x.ts -> ./dist-opt/x.js */
@@ -200,7 +207,7 @@ function walkAssets(dir: string, out: string[] = []): string[] {
 	return out;
 }
 
-/** 把 srcRoot 下的 .ts 树转译为 outRoot/*.js（相对 .ts 后缀改写）。harness 裸导入保留（由 junction 兜底）。 */
+/** 把 srcRoot 下的 .ts 树转译为 outRoot/*.js（相对 .ts 后缀改写）。harness 裸导入原样保留。 */
 async function transpileTree(
 	srcRoot: string,
 	outRoot: string,
@@ -367,81 +374,13 @@ async function transpileDotTsDeps(
 		// 递归该依赖包产物中的 .ts 依赖
 		await transpileDotTsDeps({ name: pkgName, pkgDir, srcDir: "." } as OptimizableExtension, nm, visited, errors);
 
+		ensureCommonjsMarker(join(pkgDir, "dist-opt"));
 		const targetEntry = join(pkgDir, "dist-opt", entryRel.replace(/^\.\//, "").replace(/\.ts$/, ".js"));
 		if (existsSync(targetEntry)) {
 			visited.set(pkgName, pathToFileURL(targetEntry).href);
 			rewriteBareImportInTree(outRoot, pkgName, pathToFileURL(targetEntry).href);
 		}
 	}
-}
-
-/**
- * 把产物中三个 harness 包（pi-coding-agent / pi-ai / pi-agent-core）的裸导入改写成 file URL。
- * 与 pi loader 的 getAliases() 相同的解析逻辑（workspace 优先，否则从 harness 目录 require.resolve），
- * 保证改写后的入口与运行时 jiti alias 完全一致。
- *
- * 为什么要改写：这些包不在 pi 的 node_modules 里，原生加载子树（纯 JS ESM 被 jiti 交给原生 import()
- * 后的整棵子树）的裸导入走 Node ESM 解析，只能依赖 junction；而 npm 重审计会把 junction 当 extraneous 清掉，
- * 导致 /tool-display 等命令在运行时抛 Cannot find package。改写成 file URL 后，
- * 无论 junction 是否存在、npm 是否清理，原生子树都能直接解析到真实 harness，彻底消除这类错误。
- * junction + 启动自愈仍保留，作为旧产物与子路径导入的兜底。
- */
-export function rewriteHarnessImports(outRoot: string, harness: string): string[] {
-	const warnings: string[] = [];
-	const barePackages = collectBarePackageNames(outRoot);
-	const packagesRoot = dirname(harness);
-	/** 按 import 条件解析嵌套包入口（与 pi loader import.meta.resolve 语义一致） */
-	const resolveNestedEntry = (pkgDir: string, subpath?: string): string | undefined => {
-		try {
-			const pj = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
-			const ex = pj?.exports;
-			const key = subpath ? `./${subpath}` : ".";
-			let entry: unknown;
-			if (ex && typeof ex === "object") {
-				const target = (ex as any)[key];
-				if (typeof target === "string") entry = target;
-				else if (target && typeof target === "object") {
-					const imp = target.import;
-					entry = typeof imp === "string" ? imp
-						: imp && typeof imp === "object" && typeof imp.default === "string" ? imp.default
-						: typeof target.default === "string" ? target.default
-						: undefined;
-				}
-			} else if (typeof pj?.main === "string") {
-				entry = pj.main;
-			}
-			if (typeof entry === "string") return join(pkgDir, entry.replace(/^\.\//, ""));
-		} catch {
-			// 解析失败则返回 undefined
-		}
-		return undefined;
-	};
-	const workspaceOrImport = (pkgDir: string, workspaceRel: string, subpath?: string): string | undefined => {
-		const ws = join(packagesRoot, workspaceRel);
-		if (existsSync(ws)) return ws;
-		return resolveNestedEntry(pkgDir, subpath);
-	};
-	const piAiDir = harnessPackageDir(harness, "@earendil-works/pi-ai");
-	const piAgentCoreDir = harnessPackageDir(harness, "@earendil-works/pi-agent-core");
-	// name → 入口（与 pi getAliases 的 pi-coding-agent/pi-ai/pi-agent-core 三项一致）
-	const entries: Array<[string, string | undefined]> = [
-		["@earendil-works/pi-coding-agent", join(harness, "dist", "index.js")],
-		["@earendil-works/pi-ai", workspaceOrImport(piAiDir, "ai/dist/compat.js", "compat")],
-		["@earendil-works/pi-agent-core", workspaceOrImport(piAgentCoreDir, "agent/dist/index.js")],
-	];
-	for (const [name, entry] of entries) {
-		if (!barePackages.has(name)) continue;
-		if (!entry) {
-			warnings.push(`${name}: 无法解析 harness 入口，产物保留裸导入（依赖 junction 兜底）`);
-			continue;
-		}
-		if (!existsSync(entry)) {
-			warnings.push(`${name}: harness 入口不存在（${entry}），产物保留裸导入（依赖 junction 兜底）`);
-			continue;
-		}
-		rewriteBareImportInTree(outRoot, name, pathToFileURL(entry).href);
-	}
-	return warnings;
 }
 
 export interface BuildResult {
@@ -451,10 +390,6 @@ export interface BuildResult {
 	total: number;
 	applyMessage: string;
 	errors: string[];
-	/** junction 创建/修复失败的警告（不影响编译结果，但运行时动态 import() 可能失败） */
-	junctionWarnings: string[];
-	/** harness 裸导入改写失败/被跳过的警告（产物保留裸导入，依赖 junction 兜底） */
-	rewriteWarnings: string[];
 }
 
 export interface PackageStatus {
@@ -494,16 +429,15 @@ export async function buildOne(ext: OptimizableExtension): Promise<BuildResult> 
 	const errors: string[] = [];
 	const srcRoot = join(ext.pkgDir, ext.srcDir);
 	if (!existsSync(srcRoot)) {
-		return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `源码目录不存在: ${srcRoot}`, errors, junctionWarnings: [], rewriteWarnings: [] };
+		return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `源码目录不存在: ${srcRoot}`, errors };
 	}
-	// 确保 harness junction 存在：旧产物/子路径导入仍依赖 junction 解析；新产物已把 harness 裸导入改写为 file URL
 	const nm = nodeModulesRootOf(ext.pkgDir);
-	const junctions = ensureHarnessJunctions(nm);
 	const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
 	// 递归转译产物中 .ts 分发的依赖包（native 动态链需要 .js）
 	await transpileDotTsDeps(ext, nm, new Map(), errors);
-	// harness 裸导入 → file URL：原生加载子树不再依赖 junction（npm 重审计清掉 junction 也不受影响）
-	const rewriteWarnings = rewriteHarnessImports(join(ext.pkgDir, "dist-opt"), realHarnessDir());
+	// harness 裸导入（@earendil-works/*）原样保留，并把 dist-opt 标记为 commonjs，
+	// 让 jiti 转译整棵子树、经 virtualModules 解析到运行中的 pi（见 ensureCommonjsMarker）。
+	ensureCommonjsMarker(join(ext.pkgDir, "dist-opt"));
 
 	const targetEntry = optimizedEntryFor(ext.entry);
 	const targetFile = join(ext.pkgDir, targetEntry.replace(/^\.\//, ""));
@@ -523,8 +457,6 @@ export async function buildOne(ext: OptimizableExtension): Promise<BuildResult> 
 		total: compiled.total,
 		applyMessage,
 		errors,
-		junctionWarnings: junctions.warnings,
-		rewriteWarnings,
 	};
 }
 
@@ -588,6 +520,7 @@ export function extensionNeedsBuild(ext: OptimizableExtension): boolean {
 	if (!ext.optimized) return true;
 	const targetFile = join(ext.pkgDir, optimizedEntryFor(ext.entry).replace(/^\.\//, ""));
 	if (!existsSync(targetFile)) return true;
+	if (!hasCommonjsMarker(join(ext.pkgDir, "dist-opt"))) return true; // v0.1.7 及更早的产物
 	const srcRoot = join(ext.pkgDir, ext.srcDir);
 	if (!existsSync(srcRoot)) return false;
 	try {

@@ -1,7 +1,7 @@
 import { agentDir, agentNodeModules } from "./paths.js";
 import { runMeasure } from "./measure.js";
 import { enabledNpmPackageNames, scanOptimizableExtensions, scanPiExtensions } from "./scanner.js";
-import { buildOne, checkHarnessJunctions, ensureHarnessJunctions, extensionNeedsBuild, getPackageStatus, rollbackOne } from "./transpiler.js";
+import { buildOne, extensionNeedsBuild, findHarnessLinks, getPackageStatus, markAllDistOpt, removeHarnessLinks, rollbackOne } from "./transpiler.js";
 const PACKAGE_NAME = "pi-extension-optimizer";
 const STATUS_KEY = "pi-extension-optimizer";
 const COMMANDS = ["build", "status", "rollback", "measure", "repair", "help"];
@@ -23,7 +23,7 @@ async function chooseCommand(ctx) {
     "build \u2014 \u9884\u7F16\u8BD1\u5E76\u5E94\u7528\u4F18\u5316",
     "status \u2014 \u67E5\u770B\u6240\u6709\u6269\u5C55\u5165\u53E3\u72B6\u6001",
     "measure \u2014 \u5B50\u8FDB\u7A0B\u6D4B\u771F\u5B9E module import \u8017\u65F6",
-    "repair \u2014 \u68C0\u67E5\u5E76\u4FEE\u590D harness junction\uFF08npm \u91CD\u5BA1\u8BA1\u6E05\u9664\u540E\u81EA\u52A8\u6062\u590D\uFF09",
+    "repair \u2014 \u6E05\u7406\u65E7\u7248\u672C\u7559\u4E0B\u7684 harness \u94FE\u63A5\u5E76\u8865\u9F50 dist-opt \u7684 commonjs \u6807\u8BB0",
     "rollback \u2014 \u6062\u590D\u539F\u59CB TypeScript \u5165\u53E3",
     "help \u2014 \u67E5\u770B\u4F7F\u7528\u8BF4\u660E"
   ]);
@@ -71,21 +71,11 @@ async function handleBuild(args, ctx) {
   }
   const succeeded = results.filter((result) => result.ok).length;
   const failed = results.length - succeeded;
-  const junctionWarnings = [...new Set(results.flatMap((result) => result.junctionWarnings))];
-  const rewriteWarnings = [...new Set(results.flatMap((result) => result.rewriteWarnings))];
   await showLines(ctx, `\u6784\u5EFA\u7ED3\u679C\uFF1A${succeeded} \u6210\u529F / ${failed} \u5931\u8D25`, results.map((result) => {
     const icon = result.ok ? "\u2705" : "\u274C";
     const error = result.errors[0] ? `\uFF1B${result.errors[0]}` : "";
-    const junction = result.junctionWarnings.length > 0 ? "\uFF1B\u26A0\uFE0F junction \u8B66\u544A" : "";
-    const rewrite = result.rewriteWarnings.length > 0 ? "\uFF1B\u26A0\uFE0F \u6539\u5199\u8B66\u544A" : "";
-    return `${icon} ${result.name}: ${result.files}/${result.total} files\uFF1B${result.applyMessage}${error}${junction}${rewrite}`;
+    return `${icon} ${result.name}: ${result.files}/${result.total} files\uFF1B${result.applyMessage}${error}`;
   }));
-  if (junctionWarnings.length > 0) {
-    await showLines(ctx, `\u26A0\uFE0F junction \u8B66\u544A\uFF08${junctionWarnings.length}\uFF09\uFF1A\u9759\u6001\u5BFC\u5165\u4E0D\u53D7\u5F71\u54CD\uFF0C\u4F46\u539F\u751F\u52A0\u8F7D\u5B50\u6811\u53EF\u80FD\u5931\u8D25`, junctionWarnings);
-  }
-  if (rewriteWarnings.length > 0) {
-    await showLines(ctx, `\u26A0\uFE0F harness \u5BFC\u5165\u6539\u5199\u8B66\u544A\uFF08${rewriteWarnings.length}\uFF09\uFF1A\u4EA7\u7269\u4FDD\u7559\u88F8\u5BFC\u5165\uFF0C\u4F9D\u8D56 junction \u515C\u5E95`, rewriteWarnings);
-  }
   ctx.ui.notify(`\u4F18\u5316\u5B8C\u6210\uFF1A${succeeded} \u6210\u529F\uFF0C${failed} \u5931\u8D25\u3002`, failed > 0 ? "warning" : "success");
   if (failed === 0 && ctx.hasUI && await ctx.ui.confirm("\u4F18\u5316\u5DF2\u5B8C\u6210", "\u7ACB\u5373 reload\uFF0C\u4F7F\u65B0\u5165\u53E3\u5728\u5F53\u524D\u8FDB\u7A0B\u751F\u6548\uFF1F")) {
     await ctx.reload();
@@ -117,8 +107,7 @@ async function handleStatus(ctx) {
     broken: statuses.filter((item) => item.state === "broken").length,
     needsBuild: statuses.filter((item) => item.needs).length
   };
-  const junctionStates = checkHarnessJunctions(agentNodeModules());
-  const unhealthyJunctions = junctionStates.filter((item) => !item.ok);
+  const links = findHarnessLinks(agentNodeModules());
   await showLines(
     ctx,
     `\u6269\u5C55\u72B6\u6001\uFF1A${counts.optimized} optimized / ${counts.typescript} TypeScript / ${counts.javascript} native JS / ${counts.broken} broken \u2014 \u9700\u8981 rebuild\uFF1A${counts.needsBuild}${counts.needsBuild > 0 ? "\uFF08\u53EF\u8FD0\u884C /ext-opt build --if-needed\uFF09" : ""}`,
@@ -129,7 +118,7 @@ async function handleStatus(ctx) {
         return `${icon} ${item.name}: ${item.entry}${flags ? ` [${flags}]` : ""}`;
       }),
       "",
-      `harness junction\uFF1A${junctionStates.length - unhealthyJunctions.length}/${junctionStates.length} \u6B63\u5E38${unhealthyJunctions.length > 0 ? ` \u2014 ${unhealthyJunctions.map((item) => item.name).join(", ")} \u4E0D\u5065\u5EB7\uFF0C\u53EF\u8FD0\u884C /ext-opt repair \u6216 /reload \u81EA\u52A8\u4FEE\u590D` : ""}`
+      links.length > 0 ? `\u26A0\uFE0F \u6B8B\u7559 harness \u94FE\u63A5\uFF1A${links.join(", ")}\uFF08\u4F1A\u8BA9\u539F\u751F\u5B50\u6811\u52A0\u8F7D\u7B2C\u4E8C\u4EFD pi\uFF09\uFF0C\u8FD0\u884C /ext-opt repair \u6216 /reload \u6E05\u7406` : "harness \u94FE\u63A5\uFF1A\u65E0\uFF08\u6B63\u5E38\uFF09"
     ]
   );
 }
@@ -188,24 +177,19 @@ async function handleMeasure(ctx) {
   }
 }
 async function handleRepair(ctx) {
-  const result = ensureHarnessJunctions(agentNodeModules());
-  const states = checkHarnessJunctions(agentNodeModules());
-  const healthy = states.filter((item) => item.ok);
-  const missing = states.filter((item) => !item.ok);
-  await showLines(
-    ctx,
-    `junction \u68C0\u67E5\uFF1A${healthy.length}/${states.length} \u6B63\u5E38${result.created.length > 0 ? `\uFF08\u672C\u6B21\u4FEE\u590D ${result.created.join(", ")}\uFF09` : ""}`,
-    [
-      ...states.map((item) => `${!item.needed ? "\u2796" : item.ok ? "\u2705" : "\u274C"} ${item.name}${item.reason ? ` \u2014 ${item.reason}` : ""}`),
-      ...result.warnings.length > 0 ? [`\u26A0\uFE0F ${result.warnings.join("\n\u26A0\uFE0F ")}`] : []
-    ]
-  );
-  if (missing.length === 0 && result.warnings.length === 0) {
-    ctx.ui.notify("harness junction \u5168\u90E8\u5065\u5EB7\uFF0C\u65E0\u9700\u4FEE\u590D\u3002", "success");
-  } else if (result.warnings.length > 0) {
-    ctx.ui.notify("junction \u4FEE\u590D\u5931\u8D25\uFF1A\u8BF7\u4EE5\u7BA1\u7406\u5458\u8FD0\u884C\u6216\u5F00\u542F Windows \u5F00\u53D1\u8005\u6A21\u5F0F\u3002", "error");
+  const result = removeHarnessLinks(agentNodeModules());
+  const marked = markAllDistOpt(agentNodeModules());
+  await showLines(ctx, "repair \u7ED3\u679C", [
+    result.removed.length > 0 ? `\u{1F9F9} \u5DF2\u79FB\u9664 harness \u94FE\u63A5\uFF1A${result.removed.join(", ")}` : "\u2705 \u65E0\u6B8B\u7559 harness \u94FE\u63A5",
+    marked.length > 0 ? `\u{1F3F7}\uFE0F \u5DF2\u8865\u9F50 commonjs \u6807\u8BB0\uFF1A${marked.join(", ")}` : "\u2705 dist-opt \u6807\u8BB0\u9F50\u5168",
+    ...result.warnings.map((warning) => `\u26A0\uFE0F ${warning}`)
+  ]);
+  if (result.warnings.length > 0) {
+    ctx.ui.notify("\u90E8\u5206\u94FE\u63A5\u65E0\u6CD5\u79FB\u9664\uFF0C\u8BF7\u5173\u95ED\u5360\u7528\u8FD9\u4E9B\u76EE\u5F55\u7684\u8FDB\u7A0B\u540E\u91CD\u8BD5\u3002", "error");
+  } else if (result.removed.length > 0 || marked.length > 0) {
+    ctx.ui.notify("\u5DF2\u4FEE\u590D\uFF0C\u8BF7 /reload \u4F7F\u5176\u5728\u5F53\u524D\u8FDB\u7A0B\u751F\u6548\u3002", "success");
   } else {
-    ctx.ui.notify(`\u5DF2\u4FEE\u590D ${result.created.length} \u4E2A junction\uFF0C\u52A8\u6001 import() \u73B0\u5728\u53EF\u6B63\u5E38\u89E3\u6790\u3002`, "success");
+    ctx.ui.notify("\u65E0\u9700\u4FEE\u590D\u3002", "success");
   }
 }
 async function handleHelp(ctx) {
@@ -214,7 +198,7 @@ async function handleHelp(ctx) {
     "/ext-opt build --if-needed \u2014 \u53EA\u91CD\u5EFA\u672A\u4F18\u5316/\u4EA7\u7269\u7F3A\u5931/\u6E90\u7801\u8FC7\u671F\u7684\u5305",
     "/ext-opt status    \u2014 \u67E5\u770B optimized / TypeScript / native JS / broken \u72B6\u6001",
     "/ext-opt measure   \u2014 \u5728\u72EC\u7ACB\u5B50\u8FDB\u7A0B\u4E2D\u590D\u523B\u771F\u5B9E loader \u6D4B module import",
-    "/ext-opt repair    \u2014 \u68C0\u67E5\u5E76\u4FEE\u590D harness junction\uFF08npm \u91CD\u5BA1\u8BA1\u6E05\u9664\u94FE\u63A5\u540E\u8FD0\u884C\u6B64\u547D\u4EE4\u6216\u76F4\u63A5 /reload\uFF09",
+    "/ext-opt repair    \u2014 \u6E05\u7406\u65E7\u7248\u672C\u7559\u4E0B\u7684 harness \u94FE\u63A5\u3001\u8865\u9F50 dist-opt commonjs \u6807\u8BB0\uFF08\u542F\u52A8\u65F6\u4E5F\u4F1A\u81EA\u52A8\u6267\u884C\uFF09",
     "/ext-opt rollback  \u2014 \u4ECE package.json.pi-orig \u6062\u590D\u539F\u5165\u53E3\uFF08\u9ED8\u8BA4\u5168\u90E8\uFF09",
     "/ext-opt rollback <name> \u2014 \u53EA\u56DE\u6EDA\u6307\u5B9A\u5305",
     "build/rollback \u53EF\u52A0 --yes \u8DF3\u8FC7\u786E\u8BA4\uFF08\u7528\u4E8E\u975E\u4EA4\u4E92\u6A21\u5F0F\uFF09",
@@ -223,7 +207,9 @@ async function handleHelp(ctx) {
 }
 function extensionOptimizer(pi) {
   try {
-    ensureHarnessJunctions(agentNodeModules());
+    const nm = agentNodeModules();
+    markAllDistOpt(nm);
+    removeHarnessLinks(nm);
   } catch {
   }
   pi.registerCommand("ext-opt", {

@@ -6,80 +6,95 @@ import {
   readdirSync,
   readFileSync,
   statSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
-import { realHarnessDir } from "./paths.js";
 const SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
-function harnessPackageDir(harness, packageName) {
-  if (packageName === "@earendil-works/pi-coding-agent") return harness;
-  const leaf = packageName.slice(packageName.lastIndexOf("/") + 1);
-  const nested = join(harness, "node_modules", "@earendil-works", leaf);
-  const flat = join(dirname(harness), leaf);
-  if (existsSync(join(nested, "package.json"))) return nested;
-  if (existsSync(join(flat, "package.json"))) return flat;
-  return nested;
-}
-function harnessJunctionTargets(harness) {
-  const names = [
-    "@earendil-works/pi-coding-agent",
-    "@earendil-works/pi-ai",
-    "@earendil-works/pi-agent-core"
-  ];
-  return names.map((name) => [name, harnessPackageDir(harness, name)]);
-}
-function ensureHarnessJunctions(nm, harness = realHarnessDir()) {
-  const created = [];
-  const warnings = [];
-  for (const [name, target] of harnessJunctionTargets(harness)) {
-    const link = join(nm, name);
-    let hasLink = false;
+const HARNESS_SCOPES = ["@earendil-works", "@mariozechner"];
+function findHarnessLinks(nm) {
+  const links = [];
+  for (const scope of HARNESS_SCOPES) {
+    let names;
     try {
-      lstatSync(link);
-      hasLink = true;
+      names = readdirSync(join(nm, scope));
     } catch {
+      continue;
     }
-    if (hasLink) {
-      if (existsSync(link)) continue;
+    for (const name of names) {
       try {
-        unlinkSync(link);
-      } catch (error) {
-        warnings.push(`${name}: \u635F\u574F\u7684\u94FE\u63A5\u65E0\u6CD5\u79FB\u9664\uFF08${error.message}\uFF09\uFF0C\u52A8\u6001 import() \u53EF\u80FD\u89E3\u6790\u5931\u8D25`);
-        continue;
+        if (lstatSync(join(nm, scope, name)).isSymbolicLink()) links.push(`${scope}/${name}`);
+      } catch {
       }
     }
-    if (!existsSync(target)) continue;
+  }
+  return links;
+}
+function removeHarnessLinks(nm) {
+  const removed = [];
+  const warnings = [];
+  for (const name of findHarnessLinks(nm)) {
     try {
-      mkdirSync(dirname(link), { recursive: true });
-      symlinkSync(target, link, "junction");
-      created.push(name);
+      unlinkSync(join(nm, name));
+      removed.push(name);
     } catch (error) {
-      warnings.push(`${name}: \u521B\u5EFA junction \u5931\u8D25\uFF08${error.message}\uFF09\uFF0C\u8FD0\u884C\u65F6\u52A8\u6001 import() \u4F1A\u62A5 Cannot find package\uFF1B\u8BF7\u4EE5\u7BA1\u7406\u5458\u8FD0\u884C\u6216\u5F00\u542F\u5F00\u53D1\u8005\u6A21\u5F0F\u540E\u91CD\u65B0 build`);
+      warnings.push(`${name}: \u65E0\u6CD5\u79FB\u9664\u94FE\u63A5\uFF08${error.message}\uFF09`);
     }
   }
-  return { created, warnings };
+  return { removed, warnings };
 }
-function checkHarnessJunctions(nm, harness = realHarnessDir()) {
-  const states = [];
-  for (const [name, target] of harnessJunctionTargets(harness)) {
-    const link = join(nm, name);
-    let hasLink = false;
+function ensureCommonjsMarker(outRoot) {
+  if (!existsSync(outRoot)) return false;
+  const pjPath = join(outRoot, "package.json");
+  let pj = {};
+  if (existsSync(pjPath)) {
     try {
-      lstatSync(link);
-      hasLink = true;
+      const parsed = JSON.parse(readFileSync(pjPath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) pj = parsed;
     } catch {
     }
-    if (hasLink) {
-      states.push(existsSync(link) ? { name, ok: true, needed: true } : { name, ok: false, needed: true, reason: "\u635F\u574F\u7684\u94FE\u63A5\uFF08\u76EE\u6807\u4E0D\u53EF\u89E3\u6790\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" });
+  }
+  if (pj.type === "commonjs") return false;
+  pj.type = "commonjs";
+  writeFileSync(pjPath, `${JSON.stringify(pj, null, 2)}
+`);
+  return true;
+}
+function hasCommonjsMarker(outRoot) {
+  try {
+    return JSON.parse(readFileSync(join(outRoot, "package.json"), "utf8"))?.type === "commonjs";
+  } catch {
+    return false;
+  }
+}
+function markAllDistOpt(nm) {
+  const marked = [];
+  const visit = (pkgDir, name) => {
+    if (ensureCommonjsMarker(join(pkgDir, "dist-opt"))) marked.push(name);
+  };
+  let names;
+  try {
+    names = readdirSync(nm);
+  } catch {
+    return marked;
+  }
+  for (const name of names) {
+    if (name.startsWith(".")) continue;
+    if (name.startsWith("@")) {
+      let scoped;
+      try {
+        scoped = readdirSync(join(nm, name));
+      } catch {
+        continue;
+      }
+      for (const child of scoped) visit(join(nm, name, child), `${name}/${child}`);
     } else {
-      states.push(existsSync(target) ? { name, ok: false, needed: true, reason: "\u7F3A\u5931\uFF08npm \u91CD\u5BA1\u8BA1\u4F1A\u6E05\u9664\u9501\u6587\u4EF6\u5916\u7684\u94FE\u63A5\uFF09\uFF0C\u5C06\u5728\u4E0B\u6B21\u6269\u5C55\u52A0\u8F7D\u65F6\u81EA\u52A8\u4FEE\u590D" } : { name, ok: true, needed: false, reason: "\u5F53\u524D harness \u672A\u5B89\u88C5\u6B64\u5305\uFF0C\u65E0\u9700 junction" });
+      visit(join(nm, name), name);
     }
   }
-  return states;
+  return marked;
 }
 function optimizedEntryFor(entry) {
   const rel = entry.replace(/^\.\//, "");
@@ -278,63 +293,13 @@ async function transpileDotTsDeps(ext, nm, visited, errors) {
     if (!entryRel || !entryRel.endsWith(".ts")) continue;
     const t = await transpileTree(pkgDir, join(pkgDir, "dist-opt"), errors);
     await transpileDotTsDeps({ name: pkgName, pkgDir, srcDir: "." }, nm, visited, errors);
+    ensureCommonjsMarker(join(pkgDir, "dist-opt"));
     const targetEntry = join(pkgDir, "dist-opt", entryRel.replace(/^\.\//, "").replace(/\.ts$/, ".js"));
     if (existsSync(targetEntry)) {
       visited.set(pkgName, pathToFileURL(targetEntry).href);
       rewriteBareImportInTree(outRoot, pkgName, pathToFileURL(targetEntry).href);
     }
   }
-}
-function rewriteHarnessImports(outRoot, harness) {
-  const warnings = [];
-  const barePackages = collectBarePackageNames(outRoot);
-  const packagesRoot = dirname(harness);
-  const resolveNestedEntry = (pkgDir, subpath) => {
-    try {
-      const pj = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
-      const ex = pj?.exports;
-      const key = subpath ? `./${subpath}` : ".";
-      let entry;
-      if (ex && typeof ex === "object") {
-        const target = ex[key];
-        if (typeof target === "string") entry = target;
-        else if (target && typeof target === "object") {
-          const imp = target.import;
-          entry = typeof imp === "string" ? imp : imp && typeof imp === "object" && typeof imp.default === "string" ? imp.default : typeof target.default === "string" ? target.default : void 0;
-        }
-      } else if (typeof pj?.main === "string") {
-        entry = pj.main;
-      }
-      if (typeof entry === "string") return join(pkgDir, entry.replace(/^\.\//, ""));
-    } catch {
-    }
-    return void 0;
-  };
-  const workspaceOrImport = (pkgDir, workspaceRel, subpath) => {
-    const ws = join(packagesRoot, workspaceRel);
-    if (existsSync(ws)) return ws;
-    return resolveNestedEntry(pkgDir, subpath);
-  };
-  const piAiDir = harnessPackageDir(harness, "@earendil-works/pi-ai");
-  const piAgentCoreDir = harnessPackageDir(harness, "@earendil-works/pi-agent-core");
-  const entries = [
-    ["@earendil-works/pi-coding-agent", join(harness, "dist", "index.js")],
-    ["@earendil-works/pi-ai", workspaceOrImport(piAiDir, "ai/dist/compat.js", "compat")],
-    ["@earendil-works/pi-agent-core", workspaceOrImport(piAgentCoreDir, "agent/dist/index.js")]
-  ];
-  for (const [name, entry] of entries) {
-    if (!barePackages.has(name)) continue;
-    if (!entry) {
-      warnings.push(`${name}: \u65E0\u6CD5\u89E3\u6790 harness \u5165\u53E3\uFF0C\u4EA7\u7269\u4FDD\u7559\u88F8\u5BFC\u5165\uFF08\u4F9D\u8D56 junction \u515C\u5E95\uFF09`);
-      continue;
-    }
-    if (!existsSync(entry)) {
-      warnings.push(`${name}: harness \u5165\u53E3\u4E0D\u5B58\u5728\uFF08${entry}\uFF09\uFF0C\u4EA7\u7269\u4FDD\u7559\u88F8\u5BFC\u5165\uFF08\u4F9D\u8D56 junction \u515C\u5E95\uFF09`);
-      continue;
-    }
-    rewriteBareImportInTree(outRoot, name, pathToFileURL(entry).href);
-  }
-  return warnings;
 }
 function applyOne(ext) {
   const packageJsonPath = join(ext.pkgDir, "package.json");
@@ -357,13 +322,12 @@ async function buildOne(ext) {
   const errors = [];
   const srcRoot = join(ext.pkgDir, ext.srcDir);
   if (!existsSync(srcRoot)) {
-    return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`, errors, junctionWarnings: [], rewriteWarnings: [] };
+    return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`, errors };
   }
   const nm = nodeModulesRootOf(ext.pkgDir);
-  const junctions = ensureHarnessJunctions(nm);
   const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
   await transpileDotTsDeps(ext, nm, /* @__PURE__ */ new Map(), errors);
-  const rewriteWarnings = rewriteHarnessImports(join(ext.pkgDir, "dist-opt"), realHarnessDir());
+  ensureCommonjsMarker(join(ext.pkgDir, "dist-opt"));
   const targetEntry = optimizedEntryFor(ext.entry);
   const targetFile = join(ext.pkgDir, targetEntry.replace(/^\.\//, ""));
   const productOk = errors.length === 0 && existsSync(targetFile);
@@ -381,9 +345,7 @@ async function buildOne(ext) {
     files: compiled.files,
     total: compiled.total,
     applyMessage,
-    errors,
-    junctionWarnings: junctions.warnings,
-    rewriteWarnings
+    errors
   };
 }
 function rollbackOne(pkg) {
@@ -433,6 +395,7 @@ function extensionNeedsBuild(ext) {
   if (!ext.optimized) return true;
   const targetFile = join(ext.pkgDir, optimizedEntryFor(ext.entry).replace(/^\.\//, ""));
   if (!existsSync(targetFile)) return true;
+  if (!hasCommonjsMarker(join(ext.pkgDir, "dist-opt"))) return true;
   const srcRoot = join(ext.pkgDir, ext.srcDir);
   if (!existsSync(srcRoot)) return false;
   try {
@@ -446,12 +409,12 @@ function extensionNeedsBuild(ext) {
 export {
   applyOne,
   buildOne,
-  checkHarnessJunctions,
-  ensureHarnessJunctions,
+  ensureCommonjsMarker,
   extensionNeedsBuild,
+  findHarnessLinks,
   getPackageStatus,
-  harnessJunctionTargets,
+  markAllDistOpt,
   optimizedEntryFor,
-  rewriteHarnessImports,
+  removeHarnessLinks,
   rollbackOne
 };
