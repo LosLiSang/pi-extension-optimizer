@@ -91,9 +91,9 @@ const agentNodeModules = memo((): string => join(agentDir(), "npm", "node_module
 
 /**
  * 真实 harness 目录（即 pi 本体安装位置）。
- * 1) 从实际 CLI 路径或 process.execPath 独立探测（不依赖可能被 npm 删除的 junction）
- * 2) pi node_modules 根现有 junction → realpath 穿透
- * 3) 最后手段：返回预期 junction 路径，供诊断明确报告缺失
+ * 1) 从实际 CLI 路径或 process.execPath 独立探测
+ * 2) pi node_modules 根下旧版本留下的链接 → realpath 穿透
+ * 3) 最后手段：返回该链接路径（仅用于 measure 诊断）
  */
 const realHarnessDir = memo((): string => {
 	const fromRuntime = harnessFromRuntime();

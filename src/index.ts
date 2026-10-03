@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { agentDir, agentNodeModules } from "./paths.js";
 import { runMeasure } from "./measure.js";
 import { enabledNpmPackageNames, scanOptimizableExtensions, scanPiExtensions } from "./scanner.js";
-import { buildOne, checkHarnessJunctions, ensureHarnessJunctions, extensionNeedsBuild, getPackageStatus, rollbackOne } from "./transpiler.js";
+import { buildOne, extensionNeedsBuild, findHarnessLinks, getPackageStatus, markAllDistOpt, removeHarnessLinks, rollbackOne } from "./transpiler.js";
 
 const PACKAGE_NAME = "pi-extension-optimizer";
 const STATUS_KEY = "pi-extension-optimizer";
@@ -28,7 +28,7 @@ async function chooseCommand(ctx: any): Promise<Command | undefined> {
 		"build — 预编译并应用优化",
 		"status — 查看所有扩展入口状态",
 		"measure — 子进程测真实 module import 耗时",
-		"repair — 检查并修复 harness junction（npm 重审计清除后自动恢复）",
+		"repair — 清理旧版本留下的 harness 链接并补齐 dist-opt 的 commonjs 标记",
 		"rollback — 恢复原始 TypeScript 入口",
 		"help — 查看使用说明",
 	]);
@@ -80,23 +80,11 @@ async function handleBuild(args: string, ctx: any) {
 
 	const succeeded = results.filter((result) => result.ok).length;
 	const failed = results.length - succeeded;
-	const junctionWarnings = [...new Set(results.flatMap((result) => result.junctionWarnings))];
-	const rewriteWarnings = [...new Set(results.flatMap((result) => result.rewriteWarnings))];
 	await showLines(ctx, `构建结果：${succeeded} 成功 / ${failed} 失败`, results.map((result) => {
 		const icon = result.ok ? "✅" : "❌";
 		const error = result.errors[0] ? `；${result.errors[0]}` : "";
-		const junction = result.junctionWarnings.length > 0 ? "；⚠️ junction 警告" : "";
-		const rewrite = result.rewriteWarnings.length > 0 ? "；⚠️ 改写警告" : "";
-		return `${icon} ${result.name}: ${result.files}/${result.total} files；${result.applyMessage}${error}${junction}${rewrite}`;
+		return `${icon} ${result.name}: ${result.files}/${result.total} files；${result.applyMessage}${error}`;
 	}));
-	if (junctionWarnings.length > 0) {
-		// 非致命：静态链由 jiti alias 处理不受影响，但原生加载子树里的裸导入会失败，必须提示用户
-		await showLines(ctx, `⚠️ junction 警告（${junctionWarnings.length}）：静态导入不受影响，但原生加载子树可能失败`, junctionWarnings);
-	}
-	if (rewriteWarnings.length > 0) {
-		await showLines(ctx, `⚠️ harness 导入改写警告（${rewriteWarnings.length}）：产物保留裸导入，依赖 junction 兜底`, rewriteWarnings);
-	}
-
 	ctx.ui.notify(`优化完成：${succeeded} 成功，${failed} 失败。`, failed > 0 ? "warning" : "success");
 	if (failed === 0 && ctx.hasUI && await ctx.ui.confirm("优化已完成", "立即 reload，使新入口在当前进程生效？")) {
 		await ctx.reload();
@@ -131,8 +119,7 @@ async function handleStatus(ctx: any) {
 		broken: statuses.filter((item) => item.state === "broken").length,
 		needsBuild: statuses.filter((item) => item.needs).length,
 	};
-	const junctionStates = checkHarnessJunctions(agentNodeModules());
-	const unhealthyJunctions = junctionStates.filter((item) => !item.ok);
+	const links = findHarnessLinks(agentNodeModules());
 	await showLines(
 		ctx,
 		`扩展状态：${counts.optimized} optimized / ${counts.typescript} TypeScript / ${counts.javascript} native JS / ${counts.broken} broken — 需要 rebuild：${counts.needsBuild}${counts.needsBuild > 0 ? "（可运行 /ext-opt build --if-needed）" : ""}`,
@@ -143,7 +130,9 @@ async function handleStatus(ctx: any) {
 				return `${icon} ${item.name}: ${item.entry}${flags ? ` [${flags}]` : ""}`;
 			}),
 			"",
-			`harness junction：${junctionStates.length - unhealthyJunctions.length}/${junctionStates.length} 正常${unhealthyJunctions.length > 0 ? ` — ${unhealthyJunctions.map((item) => item.name).join(", ")} 不健康，可运行 /ext-opt repair 或 /reload 自动修复` : ""}`,
+			links.length > 0
+				? `⚠️ 残留 harness 链接：${links.join(", ")}（会让原生子树加载第二份 pi），运行 /ext-opt repair 或 /reload 清理`
+				: "harness 链接：无（正常）",
 		],
 	);
 }
@@ -207,24 +196,19 @@ async function handleMeasure(ctx: any) {
 }
 
 async function handleRepair(ctx: any) {
-	const result = ensureHarnessJunctions(agentNodeModules());
-	const states = checkHarnessJunctions(agentNodeModules());
-	const healthy = states.filter((item) => item.ok);
-	const missing = states.filter((item) => !item.ok);
-	await showLines(
-		ctx,
-		`junction 检查：${healthy.length}/${states.length} 正常${result.created.length > 0 ? `（本次修复 ${result.created.join(", ")}）` : ""}`,
-		[
-			...states.map((item) => `${!item.needed ? "➖" : item.ok ? "✅" : "❌"} ${item.name}${item.reason ? ` — ${item.reason}` : ""}`),
-			...(result.warnings.length > 0 ? [`⚠️ ${result.warnings.join("\n⚠️ ")}`] : []),
-		],
-	);
-	if (missing.length === 0 && result.warnings.length === 0) {
-		ctx.ui.notify("harness junction 全部健康，无需修复。", "success");
-	} else if (result.warnings.length > 0) {
-		ctx.ui.notify("junction 修复失败：请以管理员运行或开启 Windows 开发者模式。", "error");
+	const result = removeHarnessLinks(agentNodeModules());
+	const marked = markAllDistOpt(agentNodeModules());
+	await showLines(ctx, "repair 结果", [
+		result.removed.length > 0 ? `🧹 已移除 harness 链接：${result.removed.join(", ")}` : "✅ 无残留 harness 链接",
+		marked.length > 0 ? `🏷️ 已补齐 commonjs 标记：${marked.join(", ")}` : "✅ dist-opt 标记齐全",
+		...result.warnings.map((warning) => `⚠️ ${warning}`),
+	]);
+	if (result.warnings.length > 0) {
+		ctx.ui.notify("部分链接无法移除，请关闭占用这些目录的进程后重试。", "error");
+	} else if (result.removed.length > 0 || marked.length > 0) {
+		ctx.ui.notify("已修复，请 /reload 使其在当前进程生效。", "success");
 	} else {
-		ctx.ui.notify(`已修复 ${result.created.length} 个 junction，动态 import() 现在可正常解析。`, "success");
+		ctx.ui.notify("无需修复。", "success");
 	}
 }
 
@@ -234,7 +218,7 @@ async function handleHelp(ctx: any) {
 		"/ext-opt build --if-needed — 只重建未优化/产物缺失/源码过期的包",
 		"/ext-opt status    — 查看 optimized / TypeScript / native JS / broken 状态",
 		"/ext-opt measure   — 在独立子进程中复刻真实 loader 测 module import",
-		"/ext-opt repair    — 检查并修复 harness junction（npm 重审计清除链接后运行此命令或直接 /reload）",
+		"/ext-opt repair    — 清理旧版本留下的 harness 链接、补齐 dist-opt commonjs 标记（启动时也会自动执行）",
 		"/ext-opt rollback  — 从 package.json.pi-orig 恢复原入口（默认全部）",
 		"/ext-opt rollback <name> — 只回滚指定包",
 		"build/rollback 可加 --yes 跳过确认（用于非交互模式）",
@@ -243,15 +227,17 @@ async function handleHelp(ctx: any) {
 }
 
 export default function extensionOptimizer(pi: ExtensionAPI) {
-	// 自愈：npm 重审计（pi install/uninstall/update）会把锁文件外的 junction 当 extraneous 清掉。
-	// 静态链由 jiti alias 兜底不受影响，但被原生加载的子树（如 config-modal -> zellij-modal）里的
-	// 裸导入会走 Node ESM 解析，必须依赖 junction → 表现为 /tool-display 等命令报
-	// "Cannot find package '@earendil-works/pi-coding-agent' imported from ..."。
-	// 这里在每次扩展加载（pi 启动 / reload）时静默修复，确保用户运行命令前链接已就位。
+	// 启动迁移（v0.1.7 及更早的残留）：
+	// 1) 移除 node_modules/@earendil-works 下指向 pi 本体的链接 —— 有它们时 Node 原生加载的子树会
+	//    再加载一份未打包的 pi（启动 +~3s，instanceof 与主进程失配）。
+	// 2) 给旧 dist-opt 补 "type":"commonjs" —— 否则删掉链接后原生子树会报 Cannot find package。
+	// 两步都很便宜（几次 readdir/lstat），且对本次已加载的模块无副作用；当前进程首次可能仍有旧行为，/reload 后生效。
 	try {
-		ensureHarnessJunctions(agentNodeModules());
+		const nm = agentNodeModules();
+		markAllDistOpt(nm);
+		removeHarnessLinks(nm);
 	} catch {
-		// 自愈失败不阻断扩展自身（repair/status 命令可查看原因）
+		// 迁移失败不阻断扩展自身（/ext-opt repair 可查看原因）
 	}
 	pi.registerCommand("ext-opt", {
 		description: "Precompile TypeScript extensions for faster pi startup",
