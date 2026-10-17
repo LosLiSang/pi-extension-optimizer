@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { scanOptimizableExtensions, scanPiExtensions } from "../dist/scanner.js";
+import { resolveExtensionFiles, scanOptimizableExtensions, scanPiExtensions } from "../dist/scanner.js";
 import { parseLanguageSetting, resolveLocale } from "../dist/i18n.js";
 import { buildOne, ensureCommonjsMarker, extensionNeedsBuild, findHarnessLinks, getPackageStatus, removeHarnessLinks, rollbackOne } from "../dist/transpiler.js";
 
@@ -182,6 +182,31 @@ try {
   assert.deepEqual(pkgEJson.pi.extensions, ["./dist-opt/index.js", "./src/second.js"]);
   rollbackOne(scanPiExtensions(nm).find((p) => p.name === "fixture-multi"));
   assert.deepEqual(JSON.parse(readFileSync(join(pkgE, "package.json"), "utf8")).pi.extensions, ["./src/index.ts", "./src/second.js"]);
+
+  // Regression: directory entries expand like pi's package manager (e.g. @monotykamary/pi-tps declares "./extensions").
+  const pkgF = join(nm, "fixture-dir");
+  mkdirSync(join(pkgF, "extensions", "tps"), { recursive: true });
+  mkdirSync(join(pkgF, "extensions", "empty"), { recursive: true });
+  mkdirSync(join(pkgF, "extensions", "nested", "inner"), { recursive: true });
+  writeFileSync(join(pkgF, "extensions", "tps", "index.ts"), "export default 1;\n");
+  writeFileSync(join(pkgF, "extensions", "top.js"), "export default 2;\n");
+  writeFileSync(join(pkgF, "extensions", "notes.md"), "ignored\n");
+  writeFileSync(join(pkgF, "extensions", "nested", "inner", "index.ts"), "export default 3;\n"); // deeper than one level: not loaded
+  mkdirSync(join(pkgF, "single"), { recursive: true });
+  writeFileSync(join(pkgF, "single", "index.js"), "export default 4;\n");
+  mkdirSync(join(pkgF, "manifest", "lib"), { recursive: true });
+  writeFileSync(join(pkgF, "manifest", "package.json"), JSON.stringify({ pi: { extensions: ["./lib/main.ts", "./lib/gone.ts"] } }));
+  writeFileSync(join(pkgF, "manifest", "lib", "main.ts"), "export default 5;\n");
+  writeFileSync(join(pkgF, "manifest", "index.ts"), "export default 6;\n"); // shadowed by the manifest
+  const resolvedF = resolveExtensionFiles(pkgF, ["./extensions", "./single", "./manifest", "./missing.ts", "./extensions/empty"]);
+  assert.deepEqual(resolvedF.files, [
+    join(pkgF, "extensions", "top.js"),
+    join(pkgF, "extensions", "tps", "index.ts"),
+    join(pkgF, "single", "index.js"),
+    join(pkgF, "manifest", "lib", "main.ts"),
+  ]);
+  assert.deepEqual(resolvedF.missing, ["./missing.ts", "./extensions/empty"]);
+  assert.deepEqual(resolveExtensionFiles(pkgF, ["./single/index.js"]).files, [join(pkgF, "single", "index.js")]);
 
   // Regression: harness link cleanup — junctions old versions created under node_modules/@earendil-works make native
   // subtrees load a second unbundled pi (+~3s) and must go; but only the link itself, never real dirs or link targets.

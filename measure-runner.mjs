@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 // Share parsing logic with the extension to avoid diverging copies (the runner ships next to dist/, so it always exists).
 // Errors are reported as { code, detail } and translated by the extension's UI layer.
-import { parseNpmName } from "./dist/scanner.js";
+import { parseNpmName, resolveExtensionFiles } from "./dist/scanner.js";
 
 function arg(name) {
   const index = process.argv.indexOf(name);
@@ -50,7 +50,7 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
 }
 
-/** Collect relative dynamic-import targets in a tree (native chains at runtime, not covered by jiti aliases). */
+/** Collect relative dynamic-import targets in a tree (modules loaded lazily at runtime, e.g. on first command use). */
 function collectRelativeDynamicImports(dir, acc = []) {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name);
@@ -69,14 +69,18 @@ function collectRelativeDynamicImports(dir, acc = []) {
   return acc;
 }
 
-/** Dynamic-chain check: load relative dynamic imports of the output natively (simulates user-triggered runtime loads). */
-async function verifyDynamicChain(pkgDir, entryFile) {
-  const inDistOpt = entryFile.includes(join(pkgDir, "dist-opt")) || String(entryFile).includes("dist-opt");
-  if (!inDistOpt) return null;
+/**
+ * Dynamic-chain check: load the relative dynamic imports of the output (simulates user-triggered runtime loads).
+ * Loads through the same jiti setup as the entry — that is the real runtime path: dist-opt is marked
+ * "type": "commonjs", so Node's native import() of these ESM-syntax files always fails (a false positive),
+ * while jiti transpiles them and resolves harness imports through its aliases / virtualModules.
+ */
+async function verifyDynamicChain(pkgDir, entryFile, createLoader) {
+  if (!String(entryFile).startsWith(join(pkgDir, "dist-opt"))) return null;
   const targets = collectRelativeDynamicImports(join(pkgDir, "dist-opt"));
   for (const target of targets) {
     try {
-      await import(pathToFileURL(target).href);
+      await createLoader().import(pathToFileURL(target).href);
     } catch (e) {
       return { code: "dynamicChain", detail: `${target.split(/[\\/]/).pop()}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}` };
     }
@@ -114,6 +118,7 @@ if (names.length === 0) names = installedPiPackages();
 const rows = [];
 let totalMs = 0;
 const loaderUrl = pathToFileURL(loader).href;
+const createLoader = () => createJiti(loaderUrl, { moduleCache: false, alias });
 
 // Warm up the harness (the real pi main process has it loaded already): shared modules land in Node's registry cache and are reused for free
 const warmStart = process.hrtime.bigint();
@@ -129,7 +134,7 @@ try {
 for (const name of names) {
   const pkgDir = join(nm, name);
   const pkg = readJson(join(pkgDir, "package.json"));
-  const entries = Array.isArray(pkg?.pi?.extensions) ? pkg.pi.extensions : [];
+  const entries = Array.isArray(pkg?.pi?.extensions) ? pkg.pi.extensions.filter((entry) => typeof entry === "string") : [];
   if (entries.length === 0) {
     rows.push({ name, ms: 0, error: { code: "notInstalled" } });
     continue;
@@ -137,13 +142,11 @@ for (const name of names) {
 
   let packageMs = 0;
   let error;
-  for (const rel of entries) {
-    const entry = join(pkgDir, String(rel).replace(/^\.\//, ""));
-    if (!existsSync(entry)) {
-      error = { code: "entryMissing", detail: String(rel) };
-      break;
-    }
-    const jiti = createJiti(loaderUrl, { moduleCache: false, alias });
+  // Directory entries (e.g. "./extensions") expand the same way pi's package manager does.
+  const { files, missing } = resolveExtensionFiles(pkgDir, entries);
+  if (missing.length > 0) error = { code: "entryMissing", detail: missing.join(", ") };
+  for (const entry of error ? [] : files) {
+    const jiti = createLoader();
     const started = process.hrtime.bigint();
     try {
       await jiti.import(pathToFileURL(entry).href, { default: true });
@@ -153,9 +156,8 @@ for (const name of names) {
     packageMs += Number(process.hrtime.bigint() - started) / 1e6;
     if (error) break;
   }
-  if (!error) {
-    const firstEntry = join(pkgDir, String(entries[0]).replace(/^\.\//, ""));
-    const dynError = await verifyDynamicChain(pkgDir, firstEntry);
+  if (!error && files.length > 0) {
+    const dynError = await verifyDynamicChain(pkgDir, files[0], createLoader);
     if (dynError) error = dynError;
   }
   totalMs += packageMs;

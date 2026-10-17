@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 /** Parse an npm spec (@scope/pkg@1.2.3 -> @scope/pkg; pkg@1 -> pkg). */
 export function parseNpmName(spec: string): string {
@@ -46,6 +46,72 @@ function readJson(path: string): any | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+const isExtensionFile = (name: string) => name.endsWith(".ts") || name.endsWith(".js");
+
+/** Entries of a directory resource, mirroring pi's resolveExtensionEntries: pi.extensions in package.json, else index.ts / index.js. */
+function directoryEntryFiles(dir: string): string[] | undefined {
+	const declared = readJson(join(dir, "package.json"))?.pi?.extensions;
+	if (Array.isArray(declared)) {
+		const files = declared.filter((entry): entry is string => typeof entry === "string").map((entry) => resolve(dir, entry)).filter((file) => existsSync(file));
+		if (files.length > 0) return files;
+	}
+	for (const index of ["index.ts", "index.js"]) {
+		if (existsSync(join(dir, index))) return [join(dir, index)];
+	}
+	return undefined;
+}
+
+/**
+ * Expand a package's pi.extensions entries into the files pi actually loads (mirrors pi's package manager):
+ * - a file entry is loaded as-is; a missing entry is reported in `missing`
+ * - a directory entry resolves to its own entries (package.json / index), otherwise to the *.ts / *.js files
+ *   directly inside it plus subdirectories that have entries (one level, no further recursion).
+ * Simplification: .gitignore-style ignore files and glob entries are not evaluated.
+ */
+export function resolveExtensionFiles(pkgDir: string, entries: string[]): { files: string[]; missing: string[] } {
+	const files: string[] = [];
+	const missing: string[] = [];
+	for (const entry of entries) {
+		const full = resolve(pkgDir, entry);
+		let stat;
+		try {
+			stat = statSync(full);
+		} catch {
+			missing.push(entry);
+			continue;
+		}
+		if (stat.isFile()) {
+			files.push(full);
+			continue;
+		}
+		const own = directoryEntryFiles(full);
+		if (own) {
+			files.push(...own);
+			continue;
+		}
+		let names: string[] = [];
+		try {
+			names = readdirSync(full).filter((name) => !name.startsWith(".") && name !== "node_modules").sort();
+		} catch {
+			// unreadable directory: treated as empty
+		}
+		const before = files.length;
+		for (const name of names) {
+			const child = join(full, name);
+			let childStat;
+			try {
+				childStat = statSync(child);
+			} catch {
+				continue;
+			}
+			if (childStat.isFile() && isExtensionFile(name)) files.push(child);
+			else if (childStat.isDirectory()) files.push(...(directoryEntryFiles(child) ?? []));
+		}
+		if (files.length === before) missing.push(entry);
+	}
+	return { files, missing };
 }
 
 function inferSrcDir(entry: string): string {

@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 function parseNpmName(spec) {
   if (spec.startsWith("@")) {
     const slash = spec.indexOf("/");
@@ -26,6 +26,60 @@ function readJson(path) {
   } catch {
     return void 0;
   }
+}
+const isExtensionFile = (name) => name.endsWith(".ts") || name.endsWith(".js");
+function directoryEntryFiles(dir) {
+  const declared = readJson(join(dir, "package.json"))?.pi?.extensions;
+  if (Array.isArray(declared)) {
+    const files = declared.filter((entry) => typeof entry === "string").map((entry) => resolve(dir, entry)).filter((file) => existsSync(file));
+    if (files.length > 0) return files;
+  }
+  for (const index of ["index.ts", "index.js"]) {
+    if (existsSync(join(dir, index))) return [join(dir, index)];
+  }
+  return void 0;
+}
+function resolveExtensionFiles(pkgDir, entries) {
+  const files = [];
+  const missing = [];
+  for (const entry of entries) {
+    const full = resolve(pkgDir, entry);
+    let stat;
+    try {
+      stat = statSync(full);
+    } catch {
+      missing.push(entry);
+      continue;
+    }
+    if (stat.isFile()) {
+      files.push(full);
+      continue;
+    }
+    const own = directoryEntryFiles(full);
+    if (own) {
+      files.push(...own);
+      continue;
+    }
+    let names = [];
+    try {
+      names = readdirSync(full).filter((name) => !name.startsWith(".") && name !== "node_modules").sort();
+    } catch {
+    }
+    const before = files.length;
+    for (const name of names) {
+      const child = join(full, name);
+      let childStat;
+      try {
+        childStat = statSync(child);
+      } catch {
+        continue;
+      }
+      if (childStat.isFile() && isExtensionFile(name)) files.push(child);
+      else if (childStat.isDirectory()) files.push(...directoryEntryFiles(child) ?? []);
+    }
+    if (files.length === before) missing.push(entry);
+  }
+  return { files, missing };
 }
 function inferSrcDir(entry) {
   const rel = entry.replace(/^\.\//, "");
@@ -91,6 +145,7 @@ function scanOptimizableExtensions(nmDir, exclude = []) {
 export {
   enabledNpmPackageNames,
   parseNpmName,
+  resolveExtensionFiles,
   scanOptimizableExtensions,
   scanPiExtensions
 };
