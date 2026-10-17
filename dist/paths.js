@@ -49,6 +49,16 @@ function harnessFromArgv() {
   }
   return void 0;
 }
+function findPackageDir(fromDir, name) {
+  let current = resolve(fromDir);
+  for (; ; ) {
+    const candidate = join(current, "node_modules", name);
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    const parent = dirname(current);
+    if (parent === current) return void 0;
+    current = parent;
+  }
+}
 function harnessFromRuntime() {
   return harnessFromArgv() ?? harnessFromExecPath();
 }
@@ -91,5 +101,6 @@ const realHarnessDir = memo(() => {
 export {
   agentDir,
   agentNodeModules,
+  findPackageDir,
   realHarnessDir
 };

@@ -208,6 +208,19 @@ try {
   assert.deepEqual(resolvedF.missing, ["./missing.ts", "./extensions/empty"]);
   assert.deepEqual(resolveExtensionFiles(pkgF, ["./single/index.js"]).files, [join(pkgF, "single", "index.js")]);
 
+  // Regression: harness deps are found both nested (npm global) and hoisted next to the harness (pi installer 1.3+).
+  const { findPackageDir } = await import("../dist/paths.js");
+  const hoistedNm = join(root, "release", "node_modules");
+  const hoistedHarness = join(hoistedNm, "@earendil-works", "pi-coding-agent");
+  mkdirSync(join(hoistedNm, "jiti"), { recursive: true });
+  mkdirSync(hoistedHarness, { recursive: true });
+  writeFileSync(join(hoistedNm, "jiti", "package.json"), "{}");
+  assert.equal(findPackageDir(hoistedHarness, "jiti"), join(hoistedNm, "jiti"), "hoisted layout");
+  mkdirSync(join(hoistedHarness, "node_modules", "jiti"), { recursive: true });
+  writeFileSync(join(hoistedHarness, "node_modules", "jiti", "package.json"), "{}");
+  assert.equal(findPackageDir(hoistedHarness, "jiti"), join(hoistedHarness, "node_modules", "jiti"), "nested copy wins, like Node");
+  assert.equal(findPackageDir(hoistedHarness, "no-such-dep-xyz"), undefined);
+
   // Regression: harness link cleanup — junctions old versions created under node_modules/@earendil-works make native
   // subtrees load a second unbundled pi (+~3s) and must go; but only the link itself, never real dirs or link targets.
   const linkNm = join(root, "links", "node_modules");

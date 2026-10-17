@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 // Share parsing logic with the extension to avoid diverging copies (the runner ships next to dist/, so it always exists).
 // Errors are reported as { code, detail } and translated by the extension's UI layer.
+import { findPackageDir } from "./dist/paths.js";
 import { parseNpmName, resolveExtensionFiles } from "./dist/scanner.js";
 
 function arg(name) {
@@ -19,10 +20,20 @@ if (!agentDir || !harness) {
 
 const nm = join(agentDir, "npm", "node_modules");
 const loader = join(harness, "dist", "core", "extensions", "loader.js");
-const hnm = join(harness, "node_modules");
-const { createJiti } = await import(pathToFileURL(join(hnm, "jiti", "lib", "jiti-static.mjs")).href);
+// Harness dependencies may be nested (<harness>/node_modules, npm global install) or hoisted next to the harness
+// (<release>/node_modules, pi installer 1.3+); resolve them the way Node does instead of assuming one layout.
+function harnessDep(name, rel) {
+  const dir = findPackageDir(harness, name);
+  if (!dir) {
+    console.error(`measure-runner: cannot locate ${name} from ${harness}`);
+    process.exit(3);
+  }
+  return join(dir, rel);
+}
+const { createJiti } = await import(pathToFileURL(harnessDep("jiti", join("lib", "jiti-static.mjs"))).href);
 
-const earendil = (pkg, rel) => join(hnm, "@earendil-works", pkg, rel);
+const earendil = (pkg, rel) => harnessDep(`@earendil-works/${pkg}`, rel);
+const typeboxBuild = (rel) => harnessDep("typebox", join("build", rel));
 const alias = {
   "@earendil-works/pi-coding-agent": join(harness, "dist", "index.js"),
   "@earendil-works/pi-agent-core": earendil("pi-agent-core", "dist/index.js"),
@@ -38,47 +49,62 @@ const alias = {
   "@mariozechner/pi-ai/compat": earendil("pi-ai", "dist/compat.js"),
   "@mariozechner/pi-ai/oauth": earendil("pi-ai", "dist/oauth.js"),
   "@mariozechner/pi-ai": earendil("pi-ai", "dist/compat.js"),
-  typebox: join(hnm, "typebox", "build", "index.mjs"),
-  "typebox/compile": join(hnm, "typebox", "build", "compile", "index.mjs"),
-  "typebox/value": join(hnm, "typebox", "build", "value", "index.mjs"),
-  "@sinclair/typebox": join(hnm, "typebox", "build", "index.mjs"),
-  "@sinclair/typebox/compile": join(hnm, "typebox", "build", "compile", "index.mjs"),
-  "@sinclair/typebox/value": join(hnm, "typebox", "build", "value", "index.mjs")
+  typebox: typeboxBuild("index.mjs"),
+  "typebox/compile": typeboxBuild("compile/index.mjs"),
+  "typebox/value": typeboxBuild("value/index.mjs"),
+  "@sinclair/typebox": typeboxBuild("index.mjs"),
+  "@sinclair/typebox/compile": typeboxBuild("compile/index.mjs"),
+  "@sinclair/typebox/value": typeboxBuild("value/index.mjs")
 };
 
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
 }
 
-/** Collect relative dynamic-import targets in a tree (modules loaded lazily at runtime, e.g. on first command use). */
-function collectRelativeDynamicImports(dir, acc = []) {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    let stat;
-    try { stat = statSync(full); } catch { continue; }
-    if (stat.isDirectory()) {
-      if (!["node_modules", "dist", "dist-opt", ".git", "coverage"].includes(name)) collectRelativeDynamicImports(full, acc);
-    } else if (name.endsWith(".js")) {
-      const code = readFileSync(full, "utf8");
-      for (const m of code.matchAll(/import\s*\(\s*["'](\.[^"']+)["']\s*\)/g)) {
-        const target = join(dirname(full), m[1]);
-        if (existsSync(target) && !acc.includes(target)) acc.push(target);
-      }
-    }
+const RELATIVE_IMPORT_RE = /(?:from\s*|import\s*)(\(\s*)?["'](\.{1,2}\/[^"']+)["']/g;
+
+function resolveRelative(fromFile, spec) {
+  const base = join(dirname(fromFile), spec);
+  for (const candidate of [base, `${base}.js`, join(base, "index.js")]) {
+    try { if (statSync(candidate).isFile()) return candidate; } catch { /* try next */ }
   }
-  return acc;
+  return undefined;
 }
 
 /**
- * Dynamic-chain check: load the relative dynamic imports of the output (simulates user-triggered runtime loads).
+ * Relative dynamic-import targets reachable from the entry files (modules loaded lazily at runtime, e.g. on first
+ * command use). Follows the import graph instead of scanning the whole dist-opt tree, so orphaned files left by an
+ * older build layout are not reported.
+ */
+function reachableDynamicImports(entryFiles) {
+  const seen = new Set();
+  const dynamic = [];
+  const queue = [...entryFiles];
+  while (queue.length > 0) {
+    const file = queue.shift();
+    if (seen.has(file) || !file.endsWith(".js")) continue;
+    seen.add(file);
+    let code;
+    try { code = readFileSync(file, "utf8"); } catch { continue; }
+    for (const m of code.matchAll(RELATIVE_IMPORT_RE)) {
+      const target = resolveRelative(file, m[2]);
+      if (!target) continue;
+      if (m[1] && !dynamic.includes(target)) dynamic.push(target);
+      queue.push(target);
+    }
+  }
+  return dynamic;
+}
+
+/**
+ * Dynamic-chain check: load the relative dynamic imports reachable from the entry (simulates user-triggered runtime loads).
  * Loads through the same jiti setup as the entry — that is the real runtime path: dist-opt is marked
  * "type": "commonjs", so Node's native import() of these ESM-syntax files always fails (a false positive),
  * while jiti transpiles them and resolves harness imports through its aliases / virtualModules.
  */
-async function verifyDynamicChain(pkgDir, entryFile, createLoader) {
-  if (!String(entryFile).startsWith(join(pkgDir, "dist-opt"))) return null;
-  const targets = collectRelativeDynamicImports(join(pkgDir, "dist-opt"));
-  for (const target of targets) {
+async function verifyDynamicChain(pkgDir, entryFiles, createLoader) {
+  const optimized = entryFiles.filter((file) => file.startsWith(join(pkgDir, "dist-opt")));
+  for (const target of reachableDynamicImports(optimized)) {
     try {
       await createLoader().import(pathToFileURL(target).href);
     } catch (e) {
@@ -157,7 +183,7 @@ for (const name of names) {
     if (error) break;
   }
   if (!error && files.length > 0) {
-    const dynError = await verifyDynamicChain(pkgDir, files[0], createLoader);
+    const dynError = await verifyDynamicChain(pkgDir, files, createLoader);
     if (dynError) error = dynError;
   }
   totalMs += packageMs;

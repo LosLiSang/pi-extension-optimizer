@@ -67,6 +67,23 @@ function harnessFromArgv(): string | undefined {
 	return undefined;
 }
 
+/**
+ * Locate an installed package directory the way Node resolves bare specifiers: walk up from `fromDir` checking
+ * `<dir>/node_modules/<name>`. Works for both layouts pi ships with:
+ * - nested (npm global): <harness>/node_modules/<name>
+ * - hoisted (pi installer, 1.3+): <release>/node_modules/<name>, next to @earendil-works/pi-coding-agent
+ */
+export function findPackageDir(fromDir: string, name: string): string | undefined {
+	let current = resolve(fromDir);
+	for (;;) {
+		const candidate = join(current, "node_modules", name);
+		if (existsSync(join(candidate, "package.json"))) return candidate;
+		const parent = dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
 /** Harness detection that doesn't depend on agentDir; shared by the config-dir and real-harness-path lookups. */
 function harnessFromRuntime(): string | undefined {
 	return harnessFromArgv() ?? harnessFromExecPath();
