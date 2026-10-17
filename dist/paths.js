@@ -24,9 +24,9 @@ function harnessFromExecPath() {
   const binDir = dirname(process.execPath);
   const prefixDir = dirname(binDir);
   const candidates = [
-    // Windows/npm 及部分便携式 Node 布局：node.exe 与 node_modules 同目录层级。
+    // Windows/npm and some portable Node layouts: node.exe sits next to node_modules.
     join(binDir, "node_modules", "@earendil-works", "pi-coding-agent"),
-    // Unix/npm（包括 WSL + nvm）：<prefix>/bin/node + <prefix>/lib/node_modules。
+    // Unix/npm (including WSL + nvm): <prefix>/bin/node + <prefix>/lib/node_modules.
     join(prefixDir, "lib", "node_modules", "@earendil-works", "pi-coding-agent")
   ];
   return candidates.find(isHarnessDir);

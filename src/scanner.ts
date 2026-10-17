@@ -1,11 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-/** 解析 npm spec（@scope/pkg@1.2.3 -> @scope/pkg；pkg@1 -> pkg） */
+/** Parse an npm spec (@scope/pkg@1.2.3 -> @scope/pkg; pkg@1 -> pkg). */
 export function parseNpmName(spec: string): string {
 	if (spec.startsWith("@")) {
 		const slash = spec.indexOf("/");
-		if (slash < 0) return spec; // 不完整 spec（无 scope 名），原样返回
+		if (slash < 0) return spec; // incomplete spec (no name after scope): return as-is
 		const at = spec.indexOf("@", slash + 1);
 		return at >= 0 ? spec.slice(0, at) : spec;
 	}
@@ -13,7 +13,7 @@ export function parseNpmName(spec: string): string {
 	return at >= 0 ? spec.slice(0, at) : spec;
 }
 
-/** 从 ~/.pi/agent/settings.json 读取当前启用的 npm 包名集合。 */
+/** Read the set of enabled npm package names from ~/.pi/agent/settings.json. */
 export function enabledNpmPackageNames(agentDir: string): Set<string> {
 	const settings = readJson(join(agentDir, "settings.json"));
 	const names = new Set<string>();
@@ -32,11 +32,11 @@ export interface PiPackage {
 }
 
 export interface OptimizableExtension extends PiPackage {
-	/** 原始 TypeScript 入口，如 ./src/index.ts。 */
+	/** Original TypeScript entry, e.g. ./src/index.ts. */
 	sourceEntry: string;
-	/** 源码相对包根目录，如 src 或 .。 */
+	/** Source directory relative to the package root, e.g. src or ".". */
 	srcDir: string;
-	/** 当前是否已指向 dist-opt。 */
+	/** Whether the entry currently points at dist-opt. */
 	optimized: boolean;
 }
 
@@ -55,7 +55,7 @@ function inferSrcDir(entry: string): string {
 	return parts.join("/") || ".";
 }
 
-/** 扫描 node_modules 中所有声明 pi.extensions 的包。 */
+/** Scan node_modules for every package that declares pi.extensions. */
 export function scanPiExtensions(nmDir: string, exclude: string[] = []): PiPackage[] {
 	const out: PiPackage[] = [];
 	const excluded = new Set(exclude);
@@ -98,9 +98,9 @@ export function scanPiExtensions(nmDir: string, exclude: string[] = []): PiPacka
 }
 
 /**
- * 自动发现可管理的扩展：
- * 1) 当前入口为 .ts；或
- * 2) 当前已优化，package.json.pi-orig 中保存了原 .ts 入口。
+ * Discover manageable extensions:
+ * 1) the current entry is .ts; or
+ * 2) already optimized, with the original .ts entry saved in package.json.pi-orig.
  */
 export function scanOptimizableExtensions(nmDir: string, exclude: string[] = []): OptimizableExtension[] {
 	return scanPiExtensions(nmDir, exclude).flatMap((pkg) => {
@@ -117,7 +117,7 @@ export function scanOptimizableExtensions(nmDir: string, exclude: string[] = [])
 			...pkg,
 			sourceEntry,
 			srcDir: inferSrcDir(sourceEntry),
-			// 任何 dist-opt 入口都算已优化（不硬编码 index.js，非 index 入口同样适用）
+			// Any dist-opt entry counts as optimized (index.js is not hard-coded; non-index entries work too)
 			optimized: pkg.entry.startsWith("./dist-opt/"),
 		}];
 	});

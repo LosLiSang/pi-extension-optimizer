@@ -16,20 +16,20 @@ import type { OptimizableExtension, PiPackage } from "./scanner.js";
 const SKIP_DIRS = new Set(["node_modules", "dist", "dist-opt", ".git", "coverage"]);
 const BARE_IMPORT_RE = /(?:from\s+|import\s*\(\s*|import\s+|export[^;]*from\s+)\s*["']([^"']+)["']/g;
 
-/** 旧版本可能建过链接的 scope（@mariozechner 为 pi 旧命名空间）。 */
+/** Scopes under which older versions may have created links (@mariozechner is pi's former namespace). */
 const HARNESS_SCOPES = ["@earendil-works", "@mariozechner"];
 
 export interface LinkCleanupResult {
-	/** 本次移除的链接名（如 @earendil-works/pi-coding-agent） */
+	/** Links removed in this run (e.g. @earendil-works/pi-coding-agent). */
 	removed: string[];
-	/** 移除失败的原因 */
-	warnings: string[];
+	/** Links that could not be removed, with the OS error message. */
+	failures: { name: string; message: string }[];
 }
 
 /**
- * 列出 nm/@earendil-works（及旧命名空间）下的符号链接 / junction（含悬空链接）。
- * 这些链接由 v0.1.7 及更早版本创建，指向 pi 本体安装目录。
- * 真实目录（npm 正常安装的包，如 pi-tui）不算在内。
+ * List symlinks / junctions (including dangling ones) under nm/@earendil-works (and the former namespace).
+ * These were created by v0.1.7 and earlier and point at the pi installation.
+ * Real directories (packages npm installed normally, e.g. pi-tui) are not included.
  */
 export function findHarnessLinks(nm: string): string[] {
 	const links: string[] = [];
@@ -44,7 +44,7 @@ export function findHarnessLinks(nm: string): string[] {
 			try {
 				if (lstatSync(join(nm, scope, name)).isSymbolicLink()) links.push(`${scope}/${name}`);
 			} catch {
-				// 读不到就跳过
+				// Unreadable: skip
 			}
 		}
 	}
@@ -52,35 +52,35 @@ export function findHarnessLinks(nm: string): string[] {
 }
 
 /**
- * 移除 harness 链接。为什么要删：打包版 pi 通过 virtualModules 把 @earendil-works/* 解析到运行中的实例；
- * 但 Node 原生加载的子树会按 node_modules 解析，有链接时就会顺着链接再加载一份未打包的 pi
- * （实测启动 +~3s，且 instanceof / 单例与主进程不一致）。
- * 只删链接本身（unlinkSync），绝不递归删除，避免跟随 junction 误删 pi 本体。
+ * Remove harness links. Why: bundled pi resolves @earendil-works/* to the running instance via virtualModules,
+ * but subtrees loaded natively by Node resolve through node_modules; with a link present they follow it and
+ * load a second, unbundled copy of pi (measured +~3s startup, and instanceof / singletons diverge from the main process).
+ * Only the link itself is removed (unlinkSync) — never recursively, so a junction can't make us delete pi itself.
  */
 export function removeHarnessLinks(nm: string): LinkCleanupResult {
 	const removed: string[] = [];
-	const warnings: string[] = [];
+	const failures: LinkCleanupResult["failures"] = [];
 	for (const name of findHarnessLinks(nm)) {
 		try {
 			unlinkSync(join(nm, name));
 			removed.push(name);
 		} catch (error) {
-			warnings.push(`${name}: 无法移除链接（${(error as Error).message}）`);
+			failures.push({ name, message: (error as Error).message });
 		}
 	}
-	return { removed, warnings };
+	return { removed, failures };
 }
 
 /**
- * 确保 outRoot/package.json 声明 "type": "commonjs"（已有 package.json 时合并，只改 type）。
+ * Ensure outRoot/package.json declares "type": "commonjs" (merged into an existing package.json; only `type` changes).
  *
- * 为什么：扩展包通常是 "type": "module"，jiti 会把其中的 .js 交给 Node 原生 import()，
- * 之后整棵子树（含动态 import()）都由 Node 原生解析，@earendil-works/* 只能去 node_modules 里找：
- * 没有链接 → Cannot find package；有链接 → 加载第二份未打包的 pi。
- * 标记为 commonjs 后 Node 无法原生加载这些 ESM 语法的 .js，jiti 会回退为自己转译，
- * harness 导入因此经 virtualModules 解析到运行中的 pi。
+ * Why: extension packages are usually "type": "module", so jiti hands their .js to Node's native import();
+ * from then on the whole subtree (including dynamic import()) is resolved natively and @earendil-works/* can only
+ * be found in node_modules: no link → Cannot find package; link → a second, unbundled copy of pi.
+ * With the commonjs marker Node can't natively load these ESM-syntax .js files, so jiti falls back to transpiling
+ * them itself, and harness imports resolve to the running pi through virtualModules.
  *
- * 返回是否写入了文件；outRoot 不存在时返回 false。
+ * Returns whether the file was written; false when outRoot does not exist.
  */
 export function ensureCommonjsMarker(outRoot: string): boolean {
 	if (!existsSync(outRoot)) return false;
@@ -91,7 +91,7 @@ export function ensureCommonjsMarker(outRoot: string): boolean {
 			const parsed = JSON.parse(readFileSync(pjPath, "utf8"));
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) pj = parsed;
 		} catch {
-			// 损坏的 package.json：用最小标记覆盖
+			// Corrupt package.json: overwrite with the minimal marker
 		}
 	}
 	if (pj.type === "commonjs") return false;
@@ -109,7 +109,7 @@ function hasCommonjsMarker(outRoot: string): boolean {
 	}
 }
 
-/** 给 nm 下所有包（含 scope 包）的 dist-opt 补齐 commonjs 标记，返回补齐的包名。用于启动迁移旧产物。 */
+/** Add the commonjs marker to every package's dist-opt under nm (scoped included); returns the names marked. Used to migrate old outputs at startup. */
 export function markAllDistOpt(nm: string): string[] {
 	const marked: string[] = [];
 	const visit = (pkgDir: string, name: string) => {
@@ -138,7 +138,7 @@ export function markAllDistOpt(nm: string): string[] {
 	return marked;
 }
 
-/** 由原始入口推导优化后入口：./src/index.ts -> ./dist-opt/index.js；x.ts -> ./dist-opt/x.js */
+/** Derive the optimized entry from the original: ./src/index.ts -> ./dist-opt/index.js; x.ts -> ./dist-opt/x.js */
 export function optimizedEntryFor(entry: string): string {
 	const rel = entry.replace(/^\.\//, "");
 	const file = rel.split("/").pop() ?? "index.ts";
@@ -207,13 +207,13 @@ function walkAssets(dir: string, out: string[] = []): string[] {
 	return out;
 }
 
-/** 把 srcRoot 下的 .ts 树转译为 outRoot/*.js（相对 .ts 后缀改写）。harness 裸导入原样保留。 */
+/** Transpile the .ts tree under srcRoot into outRoot/*.js (relative .ts specifiers rewritten). Bare harness imports are kept as-is. */
 async function transpileTree(
 	srcRoot: string,
 	outRoot: string,
 	errors: string[],
 ): Promise<{ files: number; total: number }> {
-	// esbuild 懒加载：只在 build 时引入，避免扩展自身启动被 esbuild 编译拖慢（~2.5s）
+	// Lazy-load esbuild only at build time so it doesn't slow down this extension's own startup (~2.5s)
 	const { transform } = await import("esbuild");
 	const files = walkTypeScript(srcRoot);
 	let written = 0;
@@ -256,7 +256,7 @@ function nodeModulesRootOf(pkgDir: string): string {
 	return basename(parent) === "node_modules" ? parent : dirname(parent);
 }
 
-/** 解析包入口相对路径（exports -> main），返回 undefined 表示无法解析。 */
+/** Resolve a package's relative entry path (exports -> main); undefined when it can't be resolved. */
 function resolvePackageEntry(pj: any): string | undefined {
 	const ex = pj?.exports;
 	if (ex && typeof ex === "object") {
@@ -276,7 +276,7 @@ function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** 收集目录树中所有 import 语句的裸包名（去 scope/子路径）。不识别 require()：产物为 esm，出现 CJS 依赖属例外场景。 */
+/** Collect bare package names (scope-aware, subpath stripped) from all import statements in a tree. require() is ignored: outputs are ESM, CJS deps are an edge case. */
 function collectBarePackageNames(dir: string): Set<string> {
 	const out = new Set<string>();
 	const walk = (d: string) => {
@@ -292,7 +292,7 @@ function collectBarePackageNames(dir: string): Set<string> {
 			try {
 				st = statSync(full);
 			} catch {
-				continue; // broken symlink 等：跳过而不是中断整个 build
+				continue; // e.g. broken symlink: skip instead of aborting the whole build
 			}
 			if (st.isDirectory()) {
 				if (!SKIP_DIRS.has(n)) walk(full);
@@ -311,7 +311,7 @@ function collectBarePackageNames(dir: string): Set<string> {
 	return out;
 }
 
-/** 把目录树中所有对该包名的 import 重写为 file URL。 */
+/** Rewrite every import of pkgName in the tree to a file URL. */
 function rewriteBareImportInTree(root: string, pkgName: string, fileUrl: string) {
 	const re = new RegExp(`(from\\s+|import\\s*\\(\\s*|import\\s+|export[^;]*from\\s+)\\s*["']${escapeRegExp(pkgName)}["']`, "g");
 	const walk = (d: string) => {
@@ -342,9 +342,9 @@ function rewriteBareImportInTree(root: string, pkgName: string, fileUrl: string)
 }
 
 /**
- * 递归处理优化包产物中的 .ts 分发依赖包（如 @juicesharp/rpiv-config）：
- * 转译到其 dist-opt，并把产物中的 bare import 重写为 file URL。
- * 不改依赖包的 package.json，对未优化的使用者无影响。
+ * Recursively handle dependency packages distributed as .ts (e.g. @juicesharp/rpiv-config) used by the optimized output:
+ * transpile them into their own dist-opt and rewrite the bare imports in our output to file URLs.
+ * The dependency's package.json is left untouched, so unoptimized consumers are unaffected.
  */
 async function transpileDotTsDeps(
 	ext: OptimizableExtension,
@@ -356,7 +356,7 @@ async function transpileDotTsDeps(
 	const bare = collectBarePackageNames(outRoot);
 	for (const pkgName of bare) {
 		if (visited.has(pkgName)) continue;
-		visited.set(pkgName, null); // 占位防环
+		visited.set(pkgName, null); // placeholder to break cycles
 		const pkgDir = join(nm, pkgName);
 		const pjPath = join(pkgDir, "package.json");
 		if (!existsSync(pjPath)) continue;
@@ -367,11 +367,11 @@ async function transpileDotTsDeps(
 			continue;
 		}
 		const entryRel = resolvePackageEntry(pj);
-		if (!entryRel || !entryRel.endsWith(".ts")) continue; // 非 .ts 分发无需处理
+		if (!entryRel || !entryRel.endsWith(".ts")) continue; // not distributed as .ts: nothing to do
 
 		const t = await transpileTree(pkgDir, join(pkgDir, "dist-opt"), errors);
-		// transpileTree 已把错误按相对路径写入 errors（共享数组），无需二次包装。
-		// 递归该依赖包产物中的 .ts 依赖
+		// transpileTree already pushed errors (by relative path) into the shared array; no extra wrapping needed.
+		// Recurse into .ts dependencies of this dependency's output
 		await transpileDotTsDeps({ name: pkgName, pkgDir, srcDir: "." } as OptimizableExtension, nm, visited, errors);
 
 		ensureCommonjsMarker(join(pkgDir, "dist-opt"));
@@ -383,12 +383,23 @@ async function transpileDotTsDeps(
 	}
 }
 
+/** Outcome of applying (or refusing to apply) the optimized entry. Rendered to text by the UI layer (i18n). */
+export type ApplyOutcome =
+	| { code: "applied"; from: string; to: string }
+	| { code: "alreadyApplied" }
+	| { code: "noExtensions" }
+	| { code: "srcMissing"; path: string }
+	| { code: "transpileErrors" }
+	| { code: "artifactMissing"; entry: string };
+
+export type RollbackOutcome = "restored" | "noBackup";
+
 export interface BuildResult {
 	name: string;
 	ok: boolean;
 	files: number;
 	total: number;
-	applyMessage: string;
+	apply: ApplyOutcome;
 	errors: string[];
 }
 
@@ -401,75 +412,75 @@ export interface PackageStatus {
 }
 
 /**
- * 应用入口修改；只在完整转译成功后调用。
- * 入口目标由原始入口文件名推导（不硬编码 index.js）。
- * 当当前入口仍是原始 .ts 时，始终用当前 package.json 刷新备份，避免扩展升级后遗留旧版本备份。
- * 当当前入口已是优化入口时，绝不覆盖备份。
+ * Apply the entry rewrite; only called after a fully successful transpile.
+ * The target is derived from the original entry file name (index.js is not hard-coded).
+ * While the current entry is still the original .ts, the backup is always refreshed from the current package.json
+ * so an upgraded extension never keeps a stale backup. Once the entry is optimized, the backup is never overwritten.
  */
-export function applyOne(ext: OptimizableExtension): string {
+export function applyOne(ext: OptimizableExtension): ApplyOutcome {
 	const packageJsonPath = join(ext.pkgDir, "package.json");
 	const backupPath = `${packageJsonPath}.pi-orig`;
 	const raw = readFileSync(packageJsonPath);
 	const pkg = JSON.parse(raw.toString("utf8"));
-	if (!pkg.pi?.extensions?.length) return "无 pi.extensions，跳过";
+	if (!pkg.pi?.extensions?.length) return { code: "noExtensions" };
 	const target = optimizedEntryFor(ext.entry);
 	const previous = pkg.pi.extensions[0];
-	if (previous === target) return "已应用";
-	// 此时 package.json 是当前版本的原始入口，覆盖旧备份是安全且必要的。
+	if (previous === target) return { code: "alreadyApplied" };
+	// package.json now holds the current version's original entry, so overwriting an old backup is safe and necessary.
 	writeFileSync(backupPath, raw);
-	// 只替换第 0 项，保留多入口包的其余入口。
+	// Replace only item 0 and keep the remaining entries of multi-entry packages.
 	const extensions = [...pkg.pi.extensions];
 	extensions[0] = target;
 	pkg.pi.extensions = extensions;
 	writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
-	return `${previous} → ${target}`;
+	return { code: "applied", from: previous, to: target };
 }
 
 export async function buildOne(ext: OptimizableExtension): Promise<BuildResult> {
 	const errors: string[] = [];
 	const srcRoot = join(ext.pkgDir, ext.srcDir);
 	if (!existsSync(srcRoot)) {
-		return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `源码目录不存在: ${srcRoot}`, errors };
+		return { name: ext.name, ok: false, files: 0, total: 0, apply: { code: "srcMissing", path: srcRoot }, errors };
 	}
 	const nm = nodeModulesRootOf(ext.pkgDir);
 	const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
-	// 递归转译产物中 .ts 分发的依赖包（native 动态链需要 .js）
+	// Recursively transpile .ts-distributed dependencies of the output (native dynamic chains need .js)
 	await transpileDotTsDeps(ext, nm, new Map(), errors);
-	// harness 裸导入（@earendil-works/*）原样保留，并把 dist-opt 标记为 commonjs，
-	// 让 jiti 转译整棵子树、经 virtualModules 解析到运行中的 pi（见 ensureCommonjsMarker）。
+	// Bare harness imports (@earendil-works/*) are kept and dist-opt is marked commonjs, so jiti transpiles
+	// the whole subtree and resolves them to the running pi via virtualModules (see ensureCommonjsMarker).
 	ensureCommonjsMarker(join(ext.pkgDir, "dist-opt"));
 
 	const targetEntry = optimizedEntryFor(ext.entry);
 	const targetFile = join(ext.pkgDir, targetEntry.replace(/^\.\//, ""));
 	const productOk = errors.length === 0 && existsSync(targetFile);
-	let applyMessage: string;
+	let apply: ApplyOutcome;
 	if (errors.length > 0) {
-		applyMessage = "转译有错误，保留原入口";
+		apply = { code: "transpileErrors" };
 	} else if (!existsSync(targetFile)) {
-		applyMessage = `产物缺失（${targetEntry}），保留原入口`;
+		apply = { code: "artifactMissing", entry: targetEntry };
 	} else {
-		applyMessage = applyOne(ext);
+		apply = applyOne(ext);
 	}
 	return {
 		name: ext.name,
 		ok: productOk,
 		files: compiled.files,
 		total: compiled.total,
-		applyMessage,
+		apply,
 		errors,
 	};
 }
 
-export function rollbackOne(pkg: PiPackage): string {
+export function rollbackOne(pkg: PiPackage): RollbackOutcome {
 	const packageJsonPath = join(pkg.pkgDir, "package.json");
 	const backupPath = `${packageJsonPath}.pi-orig`;
-	if (!existsSync(backupPath)) return "无备份，未改动";
+	if (!existsSync(backupPath)) return "noBackup";
 	writeFileSync(packageJsonPath, readFileSync(backupPath));
-	return "已从 package.json.pi-orig 恢复";
+	return "restored";
 }
 
 export function getPackageStatus(pkg: PiPackage): PackageStatus {
-	// 优化入口按实际入口文件判定（非 index 入口同样适用）；其余情况保持旧语义（index.js）
+	// Optimized entries are checked by their actual file (works for non-index entries); otherwise keep the old index.js semantics
 	const distExists = pkg.entry.startsWith("./dist-opt/")
 		? existsSync(join(pkg.pkgDir, pkg.entry.replace(/^\.\//, "")))
 		: existsSync(join(pkg.pkgDir, "dist-opt", "index.js"));
@@ -481,7 +492,7 @@ export function getPackageStatus(pkg: PiPackage): PackageStatus {
 	return { name: pkg.name, entry: pkg.entry, state, distExists, hasBackup };
 }
 
-/** 目录树中满足谓词文件的最新 mtime（用于判断产物是否过期）。 */
+/** Latest mtime of files matching the predicate in a tree (used for staleness checks). */
 function latestMtime(dir: string, match: (name: string) => boolean): number {
 	let latest = 0;
 	const walk = (d: string) => {
@@ -511,16 +522,16 @@ function latestMtime(dir: string, match: (name: string) => boolean): number {
 }
 
 /**
- * 判断扩展是否需要（重新）build：
- * - 入口仍是 .ts → 需要（未优化）
- * - 入口是 dist-opt 但产物缺失 → 需要（broken）
- * - 源码树比产物树（全部 .js，而非仅入口文件）新 → 需要（过期，扩展升级后旧产物还在）
+ * Whether an extension needs a (re)build:
+ * - entry is still .ts → yes (not optimized)
+ * - entry points at dist-opt but the output is missing → yes (broken)
+ * - source tree is newer than the output tree (all .js, not just the entry) → yes (stale: extension upgraded, old output remains)
  */
 export function extensionNeedsBuild(ext: OptimizableExtension): boolean {
 	if (!ext.optimized) return true;
 	const targetFile = join(ext.pkgDir, optimizedEntryFor(ext.entry).replace(/^\.\//, ""));
 	if (!existsSync(targetFile)) return true;
-	if (!hasCommonjsMarker(join(ext.pkgDir, "dist-opt"))) return true; // v0.1.7 及更早的产物
+	if (!hasCommonjsMarker(join(ext.pkgDir, "dist-opt"))) return true; // output from v0.1.7 or earlier
 	const srcRoot = join(ext.pkgDir, ext.srcDir);
 	if (!existsSync(srcRoot)) return false;
 	try {

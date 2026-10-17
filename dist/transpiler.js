@@ -34,16 +34,16 @@ function findHarnessLinks(nm) {
 }
 function removeHarnessLinks(nm) {
   const removed = [];
-  const warnings = [];
+  const failures = [];
   for (const name of findHarnessLinks(nm)) {
     try {
       unlinkSync(join(nm, name));
       removed.push(name);
     } catch (error) {
-      warnings.push(`${name}: \u65E0\u6CD5\u79FB\u9664\u94FE\u63A5\uFF08${error.message}\uFF09`);
+      failures.push({ name, message: error.message });
     }
   }
-  return { removed, warnings };
+  return { removed, failures };
 }
 function ensureCommonjsMarker(outRoot) {
   if (!existsSync(outRoot)) return false;
@@ -306,23 +306,23 @@ function applyOne(ext) {
   const backupPath = `${packageJsonPath}.pi-orig`;
   const raw = readFileSync(packageJsonPath);
   const pkg = JSON.parse(raw.toString("utf8"));
-  if (!pkg.pi?.extensions?.length) return "\u65E0 pi.extensions\uFF0C\u8DF3\u8FC7";
+  if (!pkg.pi?.extensions?.length) return { code: "noExtensions" };
   const target = optimizedEntryFor(ext.entry);
   const previous = pkg.pi.extensions[0];
-  if (previous === target) return "\u5DF2\u5E94\u7528";
+  if (previous === target) return { code: "alreadyApplied" };
   writeFileSync(backupPath, raw);
   const extensions = [...pkg.pi.extensions];
   extensions[0] = target;
   pkg.pi.extensions = extensions;
   writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}
 `);
-  return `${previous} \u2192 ${target}`;
+  return { code: "applied", from: previous, to: target };
 }
 async function buildOne(ext) {
   const errors = [];
   const srcRoot = join(ext.pkgDir, ext.srcDir);
   if (!existsSync(srcRoot)) {
-    return { name: ext.name, ok: false, files: 0, total: 0, applyMessage: `\u6E90\u7801\u76EE\u5F55\u4E0D\u5B58\u5728: ${srcRoot}`, errors };
+    return { name: ext.name, ok: false, files: 0, total: 0, apply: { code: "srcMissing", path: srcRoot }, errors };
   }
   const nm = nodeModulesRootOf(ext.pkgDir);
   const compiled = await transpileTree(srcRoot, join(ext.pkgDir, "dist-opt"), errors);
@@ -331,29 +331,29 @@ async function buildOne(ext) {
   const targetEntry = optimizedEntryFor(ext.entry);
   const targetFile = join(ext.pkgDir, targetEntry.replace(/^\.\//, ""));
   const productOk = errors.length === 0 && existsSync(targetFile);
-  let applyMessage;
+  let apply;
   if (errors.length > 0) {
-    applyMessage = "\u8F6C\u8BD1\u6709\u9519\u8BEF\uFF0C\u4FDD\u7559\u539F\u5165\u53E3";
+    apply = { code: "transpileErrors" };
   } else if (!existsSync(targetFile)) {
-    applyMessage = `\u4EA7\u7269\u7F3A\u5931\uFF08${targetEntry}\uFF09\uFF0C\u4FDD\u7559\u539F\u5165\u53E3`;
+    apply = { code: "artifactMissing", entry: targetEntry };
   } else {
-    applyMessage = applyOne(ext);
+    apply = applyOne(ext);
   }
   return {
     name: ext.name,
     ok: productOk,
     files: compiled.files,
     total: compiled.total,
-    applyMessage,
+    apply,
     errors
   };
 }
 function rollbackOne(pkg) {
   const packageJsonPath = join(pkg.pkgDir, "package.json");
   const backupPath = `${packageJsonPath}.pi-orig`;
-  if (!existsSync(backupPath)) return "\u65E0\u5907\u4EFD\uFF0C\u672A\u6539\u52A8";
+  if (!existsSync(backupPath)) return "noBackup";
   writeFileSync(packageJsonPath, readFileSync(backupPath));
-  return "\u5DF2\u4ECE package.json.pi-orig \u6062\u590D";
+  return "restored";
 }
 function getPackageStatus(pkg) {
   const distExists = pkg.entry.startsWith("./dist-opt/") ? existsSync(join(pkg.pkgDir, pkg.entry.replace(/^\.\//, ""))) : existsSync(join(pkg.pkgDir, "dist-opt", "index.js"));

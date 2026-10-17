@@ -6,10 +6,20 @@ import { agentDir, realHarnessDir } from "./paths.js";
 const execFileAsync = promisify(execFile);
 const RESULT_MARKER = "__PI_EXT_OPT_RESULT__";
 
+/** Error codes reported by measure-runner.mjs; rendered to text by the UI layer (i18n). */
+export type MeasureErrorCode = "notInstalled" | "entryMissing" | "dynamicChain" | "import";
+
 export interface MeasureRow {
 	name: string;
 	ms: number;
-	error?: string;
+	error?: { code: MeasureErrorCode; detail?: string };
+}
+
+/** Thrown when the measure subprocess itself fails (as opposed to per-extension errors). */
+export class MeasureSubprocessError extends Error {
+	constructor(readonly code: "failed" | "noResult", readonly detail = "") {
+		super(detail ? `${code}: ${detail}` : code);
+	}
 }
 
 export interface MeasureResult {
@@ -19,7 +29,7 @@ export interface MeasureResult {
 	warnings: string[];
 }
 
-/** 在独立 Node 进程中复刻 harness loader 的 module import 测量。 */
+/** Replicate the harness loader's module-import timing in a separate Node process. */
 export async function runMeasure(): Promise<MeasureResult> {
 	const runner = fileURLToPath(new URL("../measure-runner.mjs", import.meta.url));
 	let stdout = "";
@@ -36,11 +46,11 @@ export async function runMeasure(): Promise<MeasureResult> {
 		stdout = error?.stdout ?? "";
 		stderr = error?.stderr ?? "";
 		const message = error instanceof Error ? error.message : String(error);
-		if (!stdout.includes(RESULT_MARKER)) throw new Error(`测量子进程失败: ${message}\n${stderr}`.trim());
+		if (!stdout.includes(RESULT_MARKER)) throw new MeasureSubprocessError("failed", `${message}\n${stderr}`.trim());
 	}
 
 	const markerLine = stdout.split(/\r?\n/).find((line) => line.startsWith(RESULT_MARKER));
-	if (!markerLine) throw new Error("测量子进程未返回结构化结果");
+	if (!markerLine) throw new MeasureSubprocessError("noResult");
 	const parsed = JSON.parse(markerLine.slice(RESULT_MARKER.length));
 	return {
 		totalMs: parsed.totalMs,

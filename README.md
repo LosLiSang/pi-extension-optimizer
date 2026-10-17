@@ -71,6 +71,7 @@ Then restart Pi (or `/reload`) and run:
 | `/ext-opt repair` | Remove harness links left by v0.1.7 and earlier, add missing `commonjs` markers (also runs automatically on startup) |
 | `/ext-opt rollback` | Restore every `package.json` from its `.pi-orig` backup |
 | `/ext-opt rollback <name>` | Roll back a single package |
+| `/ext-opt lang [auto\|en\|zh]` | Switch the UI language (interactive picker without an argument) |
 
 Non-interactive mutation commands accept `--yes`:
 
@@ -78,6 +79,16 @@ Non-interactive mutation commands accept `--yes`:
 /ext-opt build --yes
 /ext-opt rollback --yes
 ```
+
+## 🌐 Language
+
+The UI is available in **English** and **简体中文**. By default (`auto`) it follows your system locale — Chinese locales get Chinese, everything else gets English. Resolution order:
+
+1. `PI_EXT_OPT_LANG=en|zh|auto` environment variable
+2. `~/.pi/agent/ext-opt.json` → `{ "language": "en" | "zh" | "auto" }` (written by `/ext-opt lang`)
+3. System locale: `LC_ALL` → `LC_MESSAGES` → `LANG` → `Intl` (the only signal on Windows)
+
+`/ext-opt lang en` switches immediately, no `/reload` needed.
 
 ## 📊 Performance
 
@@ -152,7 +163,7 @@ Pi package updates or npm reinstalls replace extension directories, reverting en
 ```bash
 npm install
 npm run build        # compile src/ → dist/
-npm run test:core    # fixture tests (transpile, backup/apply/rollback, dependency-chain, commonjs marker, harness-link cleanup)
+npm run test:core    # fixture tests (transpile, backup/apply/rollback, dependency-chain, commonjs marker, harness-link cleanup, locale resolution)
 ```
 
 ## 📄 License

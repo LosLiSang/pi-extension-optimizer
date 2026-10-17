@@ -5,7 +5,36 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { scanOptimizableExtensions, scanPiExtensions } from "../dist/scanner.js";
+import { parseLanguageSetting, resolveLocale } from "../dist/i18n.js";
 import { buildOne, ensureCommonjsMarker, extensionNeedsBuild, findHarnessLinks, getPackageStatus, removeHarnessLinks, rollbackOne } from "../dist/transpiler.js";
+
+// Locale resolution (pure, table-driven). Precedence: PI_EXT_OPT_LANG > ext-opt.json > LC_ALL > LC_MESSAGES > LANG > Intl; default en.
+for (const [inputs, expected] of [
+  [{}, "en"],
+  [{ intlLocale: "zh-CN" }, "zh"],
+  [{ intlLocale: "zh-Hans-CN" }, "zh"],
+  [{ intlLocale: "en-US" }, "en"],
+  [{ intlLocale: "es-ES" }, "en"],
+  [{ LANG: "zh_CN.UTF-8", intlLocale: "en-US" }, "zh"],
+  [{ LANG: "en_US.UTF-8", intlLocale: "zh-CN" }, "en"],
+  [{ LANG: "C.UTF-8", intlLocale: "zh-CN" }, "zh"],
+  [{ LANG: "POSIX" }, "en"],
+  [{ LC_ALL: "en_US.UTF-8", LANG: "zh_CN.UTF-8" }, "en"],
+  [{ LC_MESSAGES: "zh_TW.UTF-8", LANG: "en_US.UTF-8" }, "zh"],
+  [{ configured: "en", LANG: "zh_CN.UTF-8" }, "en"],
+  [{ configured: "zh", intlLocale: "en-US" }, "zh"],
+  [{ configured: "auto", intlLocale: "zh-CN" }, "zh"],
+  [{ configured: "klingon", intlLocale: "zh-CN" }, "zh"],
+  [{ configured: 42, intlLocale: "en-US" }, "en"],
+  [{ override: "EN", configured: "zh" }, "en"],
+  [{ override: "zh", configured: "en", LANG: "en_US" }, "zh"],
+  [{ override: "auto", configured: "zh", LANG: "en_US" }, "zh"],
+  [{ override: "", configured: "en", intlLocale: "zh-CN" }, "en"],
+]) {
+  assert.equal(resolveLocale(inputs), expected, JSON.stringify(inputs));
+}
+assert.equal(parseLanguageSetting(" Zh "), "zh");
+assert.equal(parseLanguageSetting("fr"), undefined);
 
 const root = mkdtempSync(join(tmpdir(), "pi-ext-opt-test-"));
 try {
@@ -42,22 +71,22 @@ try {
   assert.equal(result.ok, true, result.errors.join("\n"));
   assert.equal(result.files, 2);
   assert.equal(existsSync(join(pkgDir, "dist-opt", "index.js")), true);
-  assert.equal(existsSync(join(pkgDir, "dist-opt", "prompts", "system.txt")), true, "静态资源文件应被同步复制到 dist-opt");
+  assert.equal(existsSync(join(pkgDir, "dist-opt", "prompts", "system.txt")), true, "static assets must be copied to dist-opt");
   assert.equal(readFileSync(join(pkgDir, "dist-opt", "prompts", "system.txt"), "utf8"), "prompt content\n");
   assert.match(readFileSync(join(pkgDir, "dist-opt", "index.js"), "utf8"), /\.\/helper\.js/);
-  // 非 harness 的裸导入保持不变。
+  // Non-harness bare imports stay unchanged.
   const fixtureOut = readFileSync(join(pkgDir, "dist-opt", "index.js"), "utf8");
   assert.match(fixtureOut, /from "typebox"/);
-  // harness 裸导入必须保留：打包版 pi 用 virtualModules 解析（同一实例、零额外开销）；
-  // 改写成 file URL 会绕过映射、再加载一份未打包的 pi（+~3s，且 instanceof 失配）。
+  // Bare harness imports must be kept: bundled pi resolves them via virtualModules (same instance, zero overhead);
+  // rewriting them to file URLs bypasses the mapping and loads another, unbundled copy of pi (+~3s, instanceof mismatch).
   assert.match(fixtureOut, /from "@earendil-works\/pi-coding-agent"/);
   assert.match(fixtureOut, /from "@earendil-works\/pi-ai"/);
   assert.match(fixtureOut, /from "@earendil-works\/pi-agent-core"/);
-  assert.doesNotMatch(fixtureOut, /file:\/\/\/[^"']*@earendil-works/, "产物不应把 harness 导入改写为 file URL");
+  assert.doesNotMatch(fixtureOut, /file:\/\/\/[^"']*@earendil-works/, "output must not rewrite harness imports to file URLs");
   assert.equal(JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")).pi.extensions[0], "./dist-opt/index.js");
-  // dist-opt 必须标记为 commonjs：阻止 Node 原生加载产物（原生子树里的 harness 裸导入会走 node_modules，
-  // 找不到包 → Cannot find package；有 junction 时又会加载第二份未打包的 pi）。标记后 jiti 转译整棵子树，
-  // harness 导入经 virtualModules 解析到运行中的 pi。
+  // dist-opt must be marked commonjs: it stops Node from natively loading the output (bare harness imports in a native
+  // subtree go through node_modules → Cannot find package, or with a junction a second unbundled pi). With the marker
+  // jiti transpiles the whole subtree and harness imports resolve to the running pi via virtualModules.
   assert.equal(JSON.parse(readFileSync(join(pkgDir, "dist-opt", "package.json"), "utf8")).type, "commonjs");
 
   const managedAfter = scanOptimizableExtensions(nm);
@@ -69,7 +98,7 @@ try {
   rollbackOne(scanPiExtensions(nm)[0]);
   assert.equal(JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")).pi.extensions[0], "./src/index.ts");
 
-  // 模拟扩展升级后旧 .pi-orig 遗留：下一次 build 必须刷新为新版本备份。
+  // Simulate a stale .pi-orig after an extension upgrade: the next build must refresh the backup.
   const upgraded = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
   upgraded.version = "2.0.0";
   writeFileSync(join(pkgDir, "package.json"), JSON.stringify(upgraded, null, 2));
@@ -79,7 +108,7 @@ try {
   rollbackOne(scanPiExtensions(nm)[0]);
   assert.equal(JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")).version, "2.0.0");
 
-  // fixture B：入口文件名非 index.ts，优化后应指向 dist-opt/entry.js 且产物存在。
+  // fixture B: entry file isn't index.ts; after optimization it must point at dist-opt/entry.js, which must exist.
   const pkgB = join(nm, "fixture-b");
   mkdirSync(join(pkgB, "src"), { recursive: true });
   writeFileSync(join(pkgB, "package.json"), JSON.stringify({ name: "fixture-b", version: "1.0.0", type: "module", pi: { extensions: ["./src/entry.ts"] } }, null, 2));
@@ -90,7 +119,7 @@ try {
   assert.equal(existsSync(join(pkgB, "dist-opt", "entry.js")), true);
   assert.equal(JSON.parse(readFileSync(join(pkgB, "package.json"), "utf8")).pi.extensions[0], "./dist-opt/entry.js");
 
-  // fixture C：源入口文件缺失（转译产物无 index.js）→ 不 apply、不创建备份、入口保持 .ts。
+  // fixture C: source entry missing (no index.js in output) → no apply, no backup, entry stays .ts.
   const pkgC = join(nm, "fixture-c");
   mkdirSync(join(pkgC, "src"), { recursive: true });
   writeFileSync(join(pkgC, "package.json"), JSON.stringify({ name: "fixture-c", version: "1.0.0", type: "module", pi: { extensions: ["./src/index.ts"] } }, null, 2));
@@ -98,11 +127,11 @@ try {
   const extC = scanOptimizableExtensions(nm).find((e) => e.name === "fixture-c");
   const resC = await buildOne(extC);
   assert.equal(resC.ok, false);
-  assert.match(resC.applyMessage, /产物缺失/);
+  assert.deepEqual(resC.apply, { code: "artifactMissing", entry: "./dist-opt/index.js" });
   assert.equal(existsSync(join(pkgC, "package.json.pi-orig")), false);
   assert.equal(JSON.parse(readFileSync(join(pkgC, "package.json"), "utf8")).pi.extensions[0], "./src/index.ts");
 
-  // fixture D：.ts 分发的依赖包被自动转译 + import 重写为 file URL（native 动态链场景）。
+  // fixture D: a .ts-distributed dependency is transpiled and its import rewritten to a file URL (native dynamic chain).
   const depDir = join(nm, "dep-ts");
   mkdirSync(depDir, { recursive: true });
   writeFileSync(join(depDir, "package.json"), JSON.stringify({ name: "dep-ts", version: "1.0.0", type: "module", main: "./index.ts" }, null, 2));
@@ -114,35 +143,35 @@ try {
   const extD = scanOptimizableExtensions(nm).find((e) => e.name === "fixture-d");
   const resD = await buildOne(extD);
   assert.equal(resD.ok, true, resD.errors.join("\n"));
-  assert.equal(existsSync(join(depDir, "dist-opt", "index.js")), true, "依赖包应生成 dist-opt");
+  assert.equal(existsSync(join(depDir, "dist-opt", "index.js")), true, "dependency must get a dist-opt");
   const depImport = readFileSync(join(pkgD, "dist-opt", "index.js"), "utf8");
   assert.match(depImport, /file:\/\/\/.*dep-ts\/dist-opt\/index\.js/);
   assert.doesNotMatch(depImport, /from "dep-ts"/);
   const pkgDOut = JSON.parse(readFileSync(join(pkgD, "dist-opt", "package.json"), "utf8"));
-  assert.equal(pkgDOut.type, "commonjs", "复制进 dist-opt 的 package.json 也必须改为 commonjs");
-  assert.equal(pkgDOut.name, "fixture-d", "合并时保留原有字段");
-  assert.equal(JSON.parse(readFileSync(join(depDir, "dist-opt", "package.json"), "utf8")).type, "commonjs", ".ts 依赖包产物同样需要标记");
+  assert.equal(pkgDOut.type, "commonjs", "package.json copied into dist-opt must also become commonjs");
+  assert.equal(pkgDOut.name, "fixture-d", "merge keeps existing fields");
+  assert.equal(JSON.parse(readFileSync(join(depDir, "dist-opt", "package.json"), "utf8")).type, "commonjs", ".ts dependency output needs the marker too");
 
-  // 回归：非 index 入口的状态与 stale 判定（旧版硬编码 dist-opt/index.js 会误判为 broken）。
+  // Regression: status and staleness for non-index entries (old versions hard-coded dist-opt/index.js and reported broken).
   const statusB = getPackageStatus(scanPiExtensions(nm).find((p) => p.name === "fixture-b"));
   assert.equal(statusB.state, "optimized");
   assert.equal(statusB.distExists, true);
   const extAfterB = scanOptimizableExtensions(nm).find((e) => e.name === "fixture-b");
   assert.equal(extAfterB.optimized, true);
   assert.equal(extensionNeedsBuild(extAfterB), false);
-  // 旧版产物没有 commonjs 标记 → 视为需要重建；ensureCommonjsMarker 可就地补齐（启动迁移用）。
+  // Old outputs without the commonjs marker need a rebuild; ensureCommonjsMarker adds it in place (startup migration).
   rmSync(join(pkgB, "dist-opt", "package.json"));
-  assert.equal(extensionNeedsBuild(extAfterB), true, "缺少 commonjs 标记的旧产物应判定为需要重建");
-  assert.equal(ensureCommonjsMarker(join(pkgB, "dist-opt")), true, "补齐标记应返回 true");
-  assert.equal(ensureCommonjsMarker(join(pkgB, "dist-opt")), false, "已有标记时幂等返回 false");
+  assert.equal(extensionNeedsBuild(extAfterB), true, "old output without commonjs marker must need a rebuild");
+  assert.equal(ensureCommonjsMarker(join(pkgB, "dist-opt")), true, "adding the marker returns true");
+  assert.equal(ensureCommonjsMarker(join(pkgB, "dist-opt")), false, "idempotent: returns false when already marked");
   assert.equal(extensionNeedsBuild(extAfterB), false);
 
-  // 回归：stale 判定按源码树 vs 产物树（touch 非入口源文件后应需要重建）。
+  // Regression: staleness compares source tree vs output tree (touching a non-entry source needs a rebuild).
   const future = (Date.now() + 60_000) / 1000;
   utimesSync(join(pkgB, "src", "entry.ts"), future, future);
   assert.equal(extensionNeedsBuild(scanOptimizableExtensions(nm).find((e) => e.name === "fixture-b")), true);
 
-  // 回归：多入口包 apply 只替换第 0 项，保留其余入口。
+  // Regression: apply on multi-entry packages replaces only item 0 and keeps the rest.
   const pkgE = join(nm, "fixture-multi");
   mkdirSync(join(pkgE, "src"), { recursive: true });
   writeFileSync(join(pkgE, "package.json"), JSON.stringify({ name: "fixture-multi", version: "1.0.0", type: "module", pi: { extensions: ["./src/index.ts", "./src/second.js"] } }, null, 2));
@@ -154,8 +183,8 @@ try {
   rollbackOne(scanPiExtensions(nm).find((p) => p.name === "fixture-multi"));
   assert.deepEqual(JSON.parse(readFileSync(join(pkgE, "package.json"), "utf8")).pi.extensions, ["./src/index.ts", "./src/second.js"]);
 
-  // 回归：harness 链接清理 —— 旧版本在 node_modules/@earendil-works 下建的 junction 会让原生子树
-  // 加载第二份未打包的 pi（+~3s），必须移除；但只删链接本身，绝不删真实目录或链接目标的内容。
+  // Regression: harness link cleanup — junctions old versions created under node_modules/@earendil-works make native
+  // subtrees load a second unbundled pi (+~3s) and must go; but only the link itself, never real dirs or link targets.
   const linkNm = join(root, "links", "node_modules");
   const linkScope = join(linkNm, "@earendil-works");
   const fakeHarness = join(root, "fake-harness");
@@ -163,20 +192,20 @@ try {
   writeFileSync(join(fakeHarness, "marker.txt"), "harness");
   mkdirSync(linkScope, { recursive: true });
   symlinkSync(fakeHarness, join(linkScope, "pi-coding-agent"), "junction");
-  symlinkSync(join(root, "gone"), join(linkScope, "pi-ai"), "junction"); // 悬空链接也要清理
-  mkdirSync(join(linkScope, "pi-tui"), { recursive: true }); // npm 真实安装的包：不能动
-  mkdirSync(join(linkScope, "pi-agent-core"), { recursive: true }); // 真实目录：不能动
+  symlinkSync(join(root, "gone"), join(linkScope, "pi-ai"), "junction"); // dangling links are cleaned up too
+  mkdirSync(join(linkScope, "pi-tui"), { recursive: true }); // real package installed by npm: leave alone
+  mkdirSync(join(linkScope, "pi-agent-core"), { recursive: true }); // real directory: leave alone
   assert.deepEqual(new Set(findHarnessLinks(linkNm)), new Set(["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"]));
   const removed = removeHarnessLinks(linkNm);
   assert.deepEqual(new Set(removed.removed), new Set(["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"]));
-  assert.deepEqual(removed.warnings, []);
+  assert.deepEqual(removed.failures, []);
   assert.deepEqual(findHarnessLinks(linkNm), []);
-  assert.equal(existsSync(join(fakeHarness, "marker.txt")), true, "删除链接不得删除目标内容");
+  assert.equal(existsSync(join(fakeHarness, "marker.txt")), true, "removing a link must not delete the target's contents");
   assert.equal(existsSync(join(linkScope, "pi-tui")), true);
   assert.equal(existsSync(join(linkScope, "pi-agent-core")), true);
-  assert.deepEqual(removeHarnessLinks(join(root, "no-such-nm")).removed, [], "目录不存在时安全返回");
+  assert.deepEqual(removeHarnessLinks(join(root, "no-such-nm")).removed, [], "safe when the directory doesn't exist");
 
-  // 回归：node.exe 与全局 npm root 不同前缀时，应从实际 CLI 路径向上定位 harness。
+  // Regression: when node.exe and the global npm root have different prefixes, locate the harness from the actual CLI path.
   const flatHarness = join(root, "flat-global", "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(join(flatHarness, "dist"), { recursive: true });
   writeFileSync(join(flatHarness, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent" }));
@@ -191,8 +220,8 @@ try {
   assert.equal(argvProbe.status, 0, argvProbe.stderr);
   assert.equal(argvProbe.stdout.trim(), flatHarness);
 
-  // 回归：Windows/npm 与 nvm-windows 常见布局为 <prefix>/node.exe + <prefix>/node_modules。
-  // 该测试只依赖目录层级关系，因此也可在非 Windows CI 上覆盖路径选择逻辑。
+  // Regression: the common Windows/npm and nvm-windows layout is <prefix>/node.exe + <prefix>/node_modules.
+  // It only depends on directory structure, so it also covers path selection on non-Windows CI.
   const windowsPrefix = join(root, "windows-prefix");
   const windowsHarness = join(windowsPrefix, "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(windowsHarness, { recursive: true });
@@ -207,8 +236,8 @@ try {
   assert.equal(windowsExecProbe.status, 0, windowsExecProbe.stderr);
   assert.equal(windowsExecProbe.stdout.trim(), windowsHarness);
 
-  // 回归：Unix/WSL 的 npm bin 入口是符号链接（<prefix>/bin/pi -> 包内 cli.js）。
-  // Windows 无开发者模式时创建文件 symlink 可能被系统拒绝；该场景只在 Unix 系统执行。
+  // Regression: on Unix/WSL the npm bin entry is a symlink (<prefix>/bin/pi -> the package's cli.js).
+  // Windows may refuse file symlinks without developer mode, so this case only runs on Unix.
   if (process.platform !== "win32") {
     const linkedBin = join(root, "linked-prefix", "bin");
     mkdirSync(linkedBin, { recursive: true });
@@ -226,7 +255,7 @@ try {
     assert.equal(linkedArgvProbe.stdout.trim(), flatHarness);
   }
 
-  // 回归：WSL+nvm 的 node 位于 <prefix>/bin，global node_modules 位于 <prefix>/lib/node_modules。
+  // Regression: with WSL+nvm node is in <prefix>/bin and the global node_modules in <prefix>/lib/node_modules.
   const nvmPrefix = join(root, "nvm-prefix");
   const nvmHarness = join(nvmPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(nvmHarness, { recursive: true });

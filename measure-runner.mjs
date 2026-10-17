@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-// 与扩展主体共用解析逻辑，避免重复实现分叉（runner 与 dist/ 同包分发，必然存在）
+// Share parsing logic with the extension to avoid diverging copies (the runner ships next to dist/, so it always exists).
+// Errors are reported as { code, detail } and translated by the extension's UI layer.
 import { parseNpmName } from "./dist/scanner.js";
 
 function arg(name) {
@@ -49,7 +50,7 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
 }
 
-/** 收集目录树中相对动态 import 目标（运行时 native 链，jiti alias 不覆盖）。 */
+/** Collect relative dynamic-import targets in a tree (native chains at runtime, not covered by jiti aliases). */
 function collectRelativeDynamicImports(dir, acc = []) {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name);
@@ -68,7 +69,7 @@ function collectRelativeDynamicImports(dir, acc = []) {
   return acc;
 }
 
-/** 动态链验证：产物中的相对动态 import 用 Node 原生加载（模拟运行时用户触发）。 */
+/** Dynamic-chain check: load relative dynamic imports of the output natively (simulates user-triggered runtime loads). */
 async function verifyDynamicChain(pkgDir, entryFile) {
   const inDistOpt = entryFile.includes(join(pkgDir, "dist-opt")) || String(entryFile).includes("dist-opt");
   if (!inDistOpt) return null;
@@ -77,7 +78,7 @@ async function verifyDynamicChain(pkgDir, entryFile) {
     try {
       await import(pathToFileURL(target).href);
     } catch (e) {
-      return `动态链 ${target.split(/[\\/]/).pop()}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`;
+      return { code: "dynamicChain", detail: `${target.split(/[\\/]/).pop()}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}` };
     }
   }
   return null;
@@ -114,7 +115,7 @@ const rows = [];
 let totalMs = 0;
 const loaderUrl = pathToFileURL(loader).href;
 
-// 预热 harness（模拟真实 pi 主进程已加载）：共享模块进 Node registry 缓存，后续扩展免费复用
+// Warm up the harness (the real pi main process has it loaded already): shared modules land in Node's registry cache and are reused for free
 const warmStart = process.hrtime.bigint();
 let warmMs = 0;
 try {
@@ -122,7 +123,7 @@ try {
   await j0.import(pathToFileURL(join(harness, "dist", "index.js")).href, { default: true });
   warmMs = Math.round(Number(process.hrtime.bigint() - warmStart) / 1e6);
 } catch {
-  warmMs = 0; // 预热失败则退化为冷启动测量
+  warmMs = 0; // warm-up failed: fall back to cold-start measurement
 }
 
 for (const name of names) {
@@ -130,7 +131,7 @@ for (const name of names) {
   const pkg = readJson(join(pkgDir, "package.json"));
   const entries = Array.isArray(pkg?.pi?.extensions) ? pkg.pi.extensions : [];
   if (entries.length === 0) {
-    rows.push({ name, ms: 0, error: "无 pi.extensions 或包未安装" });
+    rows.push({ name, ms: 0, error: { code: "notInstalled" } });
     continue;
   }
 
@@ -139,7 +140,7 @@ for (const name of names) {
   for (const rel of entries) {
     const entry = join(pkgDir, String(rel).replace(/^\.\//, ""));
     if (!existsSync(entry)) {
-      error = `入口不存在: ${rel}`;
+      error = { code: "entryMissing", detail: String(rel) };
       break;
     }
     const jiti = createJiti(loaderUrl, { moduleCache: false, alias });
@@ -147,7 +148,7 @@ for (const name of names) {
     try {
       await jiti.import(pathToFileURL(entry).href, { default: true });
     } catch (caught) {
-      error = caught instanceof Error ? caught.message.split("\n")[0] : String(caught);
+      error = { code: "import", detail: caught instanceof Error ? caught.message.split("\n")[0] : String(caught) };
     }
     packageMs += Number(process.hrtime.bigint() - started) / 1e6;
     if (error) break;

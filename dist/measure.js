@@ -4,6 +4,15 @@ import { promisify } from "node:util";
 import { agentDir, realHarnessDir } from "./paths.js";
 const execFileAsync = promisify(execFile);
 const RESULT_MARKER = "__PI_EXT_OPT_RESULT__";
+class MeasureSubprocessError extends Error {
+  constructor(code, detail = "") {
+    super(detail ? `${code}: ${detail}` : code);
+    this.code = code;
+    this.detail = detail;
+  }
+  code;
+  detail;
+}
 async function runMeasure() {
   const runner = fileURLToPath(new URL("../measure-runner.mjs", import.meta.url));
   let stdout = "";
@@ -20,11 +29,11 @@ async function runMeasure() {
     stdout = error?.stdout ?? "";
     stderr = error?.stderr ?? "";
     const message = error instanceof Error ? error.message : String(error);
-    if (!stdout.includes(RESULT_MARKER)) throw new Error(`\u6D4B\u91CF\u5B50\u8FDB\u7A0B\u5931\u8D25: ${message}
+    if (!stdout.includes(RESULT_MARKER)) throw new MeasureSubprocessError("failed", `${message}
 ${stderr}`.trim());
   }
   const markerLine = stdout.split(/\r?\n/).find((line) => line.startsWith(RESULT_MARKER));
-  if (!markerLine) throw new Error("\u6D4B\u91CF\u5B50\u8FDB\u7A0B\u672A\u8FD4\u56DE\u7ED3\u6784\u5316\u7ED3\u679C");
+  if (!markerLine) throw new MeasureSubprocessError("noResult");
   const parsed = JSON.parse(markerLine.slice(RESULT_MARKER.length));
   return {
     totalMs: parsed.totalMs,
@@ -34,5 +43,6 @@ ${stderr}`.trim());
   };
 }
 export {
+  MeasureSubprocessError,
   runMeasure
 };

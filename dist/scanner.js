@@ -83,7 +83,7 @@ function scanOptimizableExtensions(nmDir, exclude = []) {
       ...pkg,
       sourceEntry,
       srcDir: inferSrcDir(sourceEntry),
-      // 任何 dist-opt 入口都算已优化（不硬编码 index.js，非 index 入口同样适用）
+      // Any dist-opt entry counts as optimized (index.js is not hard-coded; non-index entries work too)
       optimized: pkg.entry.startsWith("./dist-opt/")
     }];
   });
